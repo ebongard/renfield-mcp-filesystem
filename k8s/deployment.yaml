@@ -26,12 +26,12 @@ spec:
             - containerPort: 8080
           env:
             - name: RENFIELD_URL
-              value: "http://renfield-backend:8000"
+              value: "http://backend:8000"
             - name: FILES_ROOTS_YAML
               value: "/config/roots.yaml"
             # Optional: POST failure/disconnect notifications somewhere.
             # - name: FILES_NOTIFY_WEBHOOK_URL
-            #   value: "http://renfield-backend:8000/api/notifications/webhook"
+            #   value: "http://backend:8000/api/notifications/webhook"
           envFrom:
             - secretRef:
                 name: renfield-mcp-filesystem-secrets
