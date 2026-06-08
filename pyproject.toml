@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renfield-mcp-filesystem"
+version = "0.1.0"
+description = "Watch-folder MCP server: event-driven detection of new files on local/SMB shares, pushed into Renfield over REST."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.26.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "watchdog>=4.0",        # event-driven local detection (inotify on Linux)
+    "smbprotocol>=1.12.0",  # SMB2/3 CHANGE_NOTIFY (event-driven)
+]
+
+[project.scripts]
+renfield-mcp-filesystem = "renfield_mcp_filesystem.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.setuptools.packages.find]
+include = ["renfield_mcp_filesystem*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
