@@ -1,0 +1,45 @@
+# Single replica: this is a watcher daemon — two replicas would both watch the
+# same shares and double-push. Recreate strategy so a rollout never runs two.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: renfield-mcp-filesystem
+  namespace: renfield
+  labels:
+    app: renfield-mcp-filesystem
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: renfield-mcp-filesystem
+  template:
+    metadata:
+      labels:
+        app: renfield-mcp-filesystem
+    spec:
+      containers:
+        - name: renfield-mcp-filesystem
+          image: registry.treehouse.x-idra.de/renfield-mcp-filesystem:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RENFIELD_URL
+              value: "http://renfield-backend:8000"
+            - name: FILES_ROOTS_YAML
+              value: "/config/roots.yaml"
+            # Optional: POST failure/disconnect notifications somewhere.
+            # - name: FILES_NOTIFY_WEBHOOK_URL
+            #   value: "http://renfield-backend:8000/api/notifications/webhook"
+          envFrom:
+            - secretRef:
+                name: renfield-mcp-filesystem-secrets
+          volumeMounts:
+            - name: roots
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: roots
+          configMap:
+            name: renfield-mcp-filesystem-roots

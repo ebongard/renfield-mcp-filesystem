@@ -1,0 +1,13 @@
+# Exposes the streamable-http MCP endpoint for the Renfield backend to reach as
+# http://renfield-mcp-filesystem:8080/mcp (the `files` stanza in mcp_servers.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: renfield-mcp-filesystem
+  namespace: renfield
+spec:
+  selector:
+    app: renfield-mcp-filesystem
+  ports:
+    - port: 8080
+      targetPort: 8080

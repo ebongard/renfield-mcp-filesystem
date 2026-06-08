@@ -1,0 +1,24 @@
+# Watch roots for renfield-mcp-filesystem.
+#
+# Mount this as a ConfigMap at the path given by FILES_ROOTS_YAML. It is
+# reloaded at RUNTIME when it changes — add/remove a root by editing it, no
+# redeploy. SMB credentials are referenced by ENV-VAR NAME (kept in a Secret),
+# NEVER inlined here, so this file can live in a ConfigMap safely.
+
+roots:
+  # An off-cluster SMB share — the primary use case (no backend mount).
+  - name: documents
+    type: smb
+    server: nas.example.lan
+    share: Documents
+    path: Inbox                 # subdir within the share that is watched
+    username_env: DOCS_SMB_USER # resolved from the env (a Secret)
+    password_env: DOCS_SMB_PASS
+    # domain_env: DOCS_SMB_DOMAIN   # optional
+    processed_subdir: processed # files move here on ingested/duplicate
+    failed_subdir: failed       # files move here on a terminal reject
+
+  # A local folder — for the docker-run quickstart (bind-mounted at /watch).
+  - name: local-inbox
+    type: local
+    path: /watch/inbox

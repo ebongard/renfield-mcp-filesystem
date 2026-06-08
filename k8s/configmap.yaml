@@ -1,0 +1,20 @@
+# The watch roots — edit + re-apply to add/remove a root at runtime (the daemon
+# reloads on change; no pod restart). Credentials are referenced by env-var name
+# (see secret.example.yaml), never inlined here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: renfield-mcp-filesystem-roots
+  namespace: renfield
+data:
+  roots.yaml: |
+    roots:
+      - name: documents
+        type: smb
+        server: nas.example.lan
+        share: Documents
+        path: Inbox
+        username_env: DOCS_SMB_USER
+        password_env: DOCS_SMB_PASS
+        processed_subdir: processed
+        failed_subdir: failed
