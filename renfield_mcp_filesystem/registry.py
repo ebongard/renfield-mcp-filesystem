@@ -16,13 +16,13 @@ from .pusher import RenfieldPusher
 logger = logging.getLogger("renfield-mcp-filesystem.registry")
 
 
-def make_provider(root: Root) -> FolderProvider:
+def make_provider(root: Root, settle_seconds: float = 2.0) -> FolderProvider:
     if isinstance(root, LocalRoot):
         return LocalProvider(root)
     if isinstance(root, SmbRoot):
         from .providers.smb import SmbProvider
 
-        return SmbProvider(root)
+        return SmbProvider(root, settle_seconds=settle_seconds)
     raise ValueError(f"unknown root type for {root.name!r}")
 
 
@@ -38,7 +38,7 @@ class ProviderRegistry:
 
     def build(self) -> None:
         for root in self._config.roots:
-            provider = make_provider(root)
+            provider = make_provider(root, settle_seconds=self._config.settle_seconds)
             self._providers[root.name] = provider
             self._engines[root.name] = IngestEngine(
                 config=self._config,
