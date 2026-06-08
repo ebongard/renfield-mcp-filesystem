@@ -205,9 +205,11 @@ class SmbProvider(FolderProvider):
     def _handle_change(self, change) -> None:
         # change.file_name is relative to the watched dir (the inbox).
         name = getattr(change, "file_name", None) or change["file_name"].get_value()
-        name = name.replace("\\", "/")
-        # Only top-level inbox files; exclude the processed/failed subdirs.
-        if "/" in name or name in self._excluded:
+        name = (name or "").replace("\\", "/").strip()
+        # Only top-level inbox files. Drop: empty names (a dir-level notify with
+        # no file name — would otherwise target the inbox itself), paths into a
+        # subdir, the processed/failed subdirs, and dotfiles.
+        if not name or "/" in name or name in self._excluded or name.startswith("."):
             return
         action = getattr(change, "action", None)
         if action is None:
@@ -288,6 +290,11 @@ class SmbProvider(FolderProvider):
     async def move_to_subdir(self, relpath: str, subdir: str) -> str:
         import smbclient
 
+        # Defense in depth: an empty relpath resolves to the inbox dir itself,
+        # so a move would relocate the whole inbox. The engine guards this, but
+        # refuse here too — this must be impossible.
+        if not relpath.strip().strip("/\\"):
+            raise ValueError("refusing to move an empty relpath (would move the inbox)")
         name = ntpath.basename(relpath.replace("/", "\\"))
 
         def _move() -> str:

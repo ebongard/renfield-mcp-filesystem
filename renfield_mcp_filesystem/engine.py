@@ -90,6 +90,14 @@ class IngestEngine:
             await self._dispatch(fi.relpath)
 
     async def _dispatch(self, relpath: str) -> None:
+        # CRITICAL: an empty / whitespace / slash-only relpath resolves to the
+        # inbox directory ITSELF — moving it would relocate the entire inbox
+        # into failed/. A provider must never hand one through (a directory-level
+        # CHANGE_NOTIFY with no file name can produce ""), so guard here as the
+        # provider-agnostic safety net before anything touches the filesystem.
+        if not relpath.strip().strip("/\\"):
+            logger.warning("root %s: ignoring empty/dir-level event", self._root.name)
+            return
         # Ignore dotfiles (.DS_Store, .hidden, editor temp/lock files). They are
         # noise, and OS-created ones (e.g. macOS .DS_Store) are often permission-
         # locked so even moving them to failed/ errors.

@@ -200,3 +200,17 @@ async def test_dotfiles_are_ignored():
     await eng._dispatch("real.pdf")
     assert prov.moved == [("real.pdf", "processed")]
     assert len(push.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["", "   ", "/", "\\", " / "])
+async def test_empty_or_dir_level_event_never_moves_the_inbox(bad):
+    # CRITICAL regression: an empty/whitespace/slash-only relpath resolves to the
+    # inbox dir itself; dispatching it must NOT push or move anything (a move
+    # would relocate the entire inbox into failed/).
+    prov = FakeProvider({"real.pdf": b"%PDF"})
+    push = FakePusher(PushOutcome(move=MoveAction.PROCESSED))
+    eng = _engine(prov, push)
+    await eng._dispatch(bad)
+    assert prov.moved == []
+    assert push.calls == []
