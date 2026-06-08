@@ -86,6 +86,20 @@ roots:
     path: /watch/inbox
 ```
 
+Each root takes an optional `processed_subdir` / `failed_subdir` (defaults
+`processed` / `failed`). After a file is handled it is moved out of the inbox:
+ingested/duplicate → `processed`, rejected → `failed`, retry → left in place.
+
+**Where the processed/failed dirs live differs by provider:**
+
+- **SMB** — at the **share root**, as *siblings* of the watched `path`. A root
+  with `path: Inbox` produces `<share>/{Inbox, processed, failed}` (not
+  `<share>/Inbox/processed`). With `path: ""` (watch the share root) they are
+  simply the two top-level dirs. The watched inbox + both dirs are auto-created
+  on connect.
+- **local** — *nested* inside the watched `path` (`<path>/processed`,
+  `<path>/failed`), since a local root is self-contained.
+
 ## Dry-run (preflight)
 
 Validate config + credentials + the matched/skipped files before the daemon

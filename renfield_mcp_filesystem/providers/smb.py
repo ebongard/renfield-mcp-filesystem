@@ -115,9 +115,13 @@ class SmbProvider(FolderProvider):
             self._root.server, username=creds.username, password=creds.password,
             port=self._root.port,
         )
-        # ensure the processed/failed subdirs exist
+        # ensure the watched inbox + the (share-root-level) processed/failed
+        # dirs exist. processed/failed are SIBLINGS of the inbox at the share
+        # root (see _root_unc), not nested under it — so a share laid out as
+        # \\server\share\{incomming,processed,failed} works as-is.
+        await asyncio.to_thread(smbclient.makedirs, self._inbox_unc, exist_ok=True)
         for sub in (self._root.processed_subdir, self._root.failed_subdir):
-            await asyncio.to_thread(smbclient.makedirs, self._child_unc(sub), exist_ok=True)
+            await asyncio.to_thread(smbclient.makedirs, self._root_unc(sub), exist_ok=True)
 
     async def start(self) -> None:
         await self.connect()
@@ -252,7 +256,16 @@ class SmbProvider(FolderProvider):
     # -- on-demand file ops (smbclient; verified at E2E) --
 
     def _child_unc(self, relpath: str) -> str:
+        """A path WITHIN the watched inbox (`<share>/<path>/<relpath>`)."""
         return _unc(self._root.server, self._root.share, self._root.path, relpath)
+
+    def _root_unc(self, relpath: str) -> str:
+        """A path at the SHARE ROOT (`<share>/<relpath>`). The processed/failed
+        subdirs live here — siblings of the inbox, not nested under it — so a
+        `path: incomming` root moves files to `<share>/processed`, giving the
+        `<share>/{incomming,processed,failed}` layout. With `path: ""`
+        (watch the share root) this is identical to `_child_unc`."""
+        return _unc(self._root.server, self._root.share, relpath)
 
     async def stat(self, relpath: str) -> FileInfo | None:
         import smbclient
@@ -283,13 +296,14 @@ class SmbProvider(FolderProvider):
             while True:
                 dest_rel = f"{subdir}/{dest_name}"
                 try:
-                    smbclient.stat(self._child_unc(dest_rel))
+                    smbclient.stat(self._root_unc(dest_rel))
                 except OSError:
                     break  # free slot
                 stem, dot, ext = name.partition(".")
                 dest_name = f"{stem}_{i}{dot}{ext}" if dot else f"{name}_{i}"
                 i += 1
-            smbclient.rename(self._child_unc(relpath), self._child_unc(dest_rel))
+            # src is in the inbox; dest is the share-root processed/failed dir.
+            smbclient.rename(self._child_unc(relpath), self._root_unc(dest_rel))
             return dest_rel
 
         return await asyncio.to_thread(_move)
