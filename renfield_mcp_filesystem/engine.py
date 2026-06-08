@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable
 
 from .config import Config, Root
 from .contract import MoveAction
+from .gate import classify
 from .providers.base import FolderProvider
 from .pusher import PushOutcome, RenfieldPusher
 
@@ -102,14 +103,9 @@ class IngestEngine:
             if info is None:
                 self._inflight.discard(relpath)  # already moved / vanished
                 return
-            if info.size == 0:
-                await self._move(relpath, MoveAction.FAILED, "empty")
-                return
-            if info.size > self._config.max_file_size_bytes:
-                await self._move(relpath, MoveAction.FAILED, "oversize")
-                return
-            if not self._config.extension_allowed(relpath):
-                await self._move(relpath, MoveAction.FAILED, "extension_not_allowed")
+            ok, reason = classify(self._config, relpath, info.size)
+            if not ok:
+                await self._move(relpath, MoveAction.FAILED, reason or "rejected")
                 return
 
             data = await self._provider.read_bytes(relpath)

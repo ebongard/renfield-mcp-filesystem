@@ -48,9 +48,15 @@ class FolderProvider(abc.ABC):
         """The most recent connection/watch error, or None if healthy."""
         return None
 
+    async def connect(self) -> None:
+        """Establish I/O readiness (SMB session / local dirs) WITHOUT starting
+        the watch. Used by dry-run to list + classify without side effects.
+        ``start()`` calls this first. Default: no-op."""
+
     @abc.abstractmethod
     async def start(self) -> None:
-        """Connect (SMB) / start the event source (local inotify). Idempotent."""
+        """connect() + start the event source (local inotify / SMB CHANGE_NOTIFY).
+        Idempotent."""
 
     @abc.abstractmethod
     async def stop(self) -> None:

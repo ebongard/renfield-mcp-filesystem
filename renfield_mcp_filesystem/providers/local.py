@@ -61,9 +61,12 @@ class LocalProvider(FolderProvider):
 
     # -- lifecycle --
 
-    async def start(self) -> None:
+    async def connect(self) -> None:
         for d in (self._inbox, self._inbox / self._processed_name, self._inbox / self._failed_name):
             d.mkdir(parents=True, exist_ok=True)
+
+    async def start(self) -> None:
+        await self.connect()
         self._loop = asyncio.get_running_loop()
         handler = _InboxHandler(
             self._inbox, {self._processed_name, self._failed_name}, self._emit_threadsafe

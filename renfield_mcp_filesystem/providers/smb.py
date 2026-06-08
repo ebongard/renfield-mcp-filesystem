@@ -106,7 +106,7 @@ class SmbProvider(FolderProvider):
 
     # -- lifecycle --
 
-    async def start(self) -> None:
+    async def connect(self) -> None:
         import smbclient
 
         creds = self._root.credentials()
@@ -119,6 +119,8 @@ class SmbProvider(FolderProvider):
         for sub in (self._root.processed_subdir, self._root.failed_subdir):
             await asyncio.to_thread(smbclient.makedirs, self._child_unc(sub), exist_ok=True)
 
+    async def start(self) -> None:
+        await self.connect()
         loop = asyncio.get_running_loop()
 
         def _emit(name: str) -> None:

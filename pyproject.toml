@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 renfield-mcp-filesystem = "renfield_mcp_filesystem.server:main"
+renfield-mcp-filesystem-scan = "renfield_mcp_filesystem.scan:main"
 
 [project.optional-dependencies]
 dev = [
