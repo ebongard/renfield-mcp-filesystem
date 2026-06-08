@@ -45,7 +45,7 @@ docker run --rm \
   -v "$PWD/roots.yaml:/config/roots.yaml:ro" \
   -v "$PWD/inbox:/watch/inbox" \
   -p 8080:8080 \
-  registry.treehouse.x-idra.de/renfield-mcp-filesystem:latest
+  registry.treehouse.x-idra.de/renfield/filesystem-mcp:latest
 ```
 
 Drop a PDF into `./inbox` → it appears in Renfield's `/wissen` and Paperless, then

@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: renfield-mcp-filesystem
-          image: registry.treehouse.x-idra.de/renfield-mcp-filesystem:latest
+          image: registry.treehouse.x-idra.de/renfield/filesystem-mcp:latest
           ports:
             - containerPort: 8080
           env:
