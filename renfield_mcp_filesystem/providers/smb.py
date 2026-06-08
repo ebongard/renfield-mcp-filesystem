@@ -192,9 +192,10 @@ class SmbProvider(FolderProvider):
         while True:
             watcher = FileSystemWatcher(self._dir_open)
             watcher.start(flags)
-            # result() blocks until the server reports a change — event-driven.
-            changes = await asyncio.to_thread(watcher.result)
-            for change in changes or []:
+            # wait() blocks until the server reports a change — event-driven.
+            # ``result`` is a PROPERTY (the list of changes), not a method.
+            await asyncio.to_thread(watcher.wait)
+            for change in watcher.result or []:
                 self._handle_change(change)
 
     def _handle_change(self, change) -> None:

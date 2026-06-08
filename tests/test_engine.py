@@ -189,3 +189,14 @@ async def test_run_processes_watch_events():
     eng = _engine(prov, push)
     await eng.run()
     assert sorted(prov.moved) == [("a.pdf", "processed"), ("b.pdf", "processed")]
+
+
+@pytest.mark.asyncio
+async def test_dotfiles_are_ignored():
+    prov = FakeProvider({".DS_Store": b"junk", "real.pdf": b"%PDF"})
+    push = FakePusher(PushOutcome(move=MoveAction.PROCESSED))
+    eng = _engine(prov, push)
+    await eng._dispatch(".DS_Store")   # ignored — not processed/moved
+    await eng._dispatch("real.pdf")
+    assert prov.moved == [("real.pdf", "processed")]
+    assert len(push.calls) == 1

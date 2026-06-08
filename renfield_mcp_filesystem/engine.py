@@ -90,6 +90,11 @@ class IngestEngine:
             await self._dispatch(fi.relpath)
 
     async def _dispatch(self, relpath: str) -> None:
+        # Ignore dotfiles (.DS_Store, .hidden, editor temp/lock files). They are
+        # noise, and OS-created ones (e.g. macOS .DS_Store) are often permission-
+        # locked so even moving them to failed/ errors.
+        if os.path.basename(relpath).startswith("."):
+            return
         # Create-only / de-dup: ignore repeat events for a file already being
         # processed or awaiting retry (e.g. multiple CLOSE_WRITE for one write).
         if relpath in self._inflight:
