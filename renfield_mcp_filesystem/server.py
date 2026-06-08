@@ -17,7 +17,6 @@ import asyncio
 import logging
 import os
 import sys
-from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
@@ -36,27 +35,8 @@ logger = logging.getLogger("renfield-mcp-filesystem")
 _manager: DaemonManager | None = None
 
 
-@asynccontextmanager
-async def _lifespan(_server: FastMCP):
-    """Start the watcher daemons (+ dynamic-roots reload) on startup; stop them
-    on shutdown."""
-    global _manager
-    config = load_config()
-    notifier = make_notifier(
-        os.environ.get("FILES_NOTIFY_WEBHOOK_URL") or None,
-        os.environ.get("FILES_NOTIFY_WEBHOOK_TOKEN") or None,
-    )
-    _manager = DaemonManager(config, notifier=notifier)
-    await _manager.start()
-    try:
-        yield {}
-    finally:
-        await _manager.stop()
-
-
 mcp = FastMCP(
     "renfield-mcp-filesystem",
-    lifespan=_lifespan,
     host=os.environ.get("FILES_MCP_HOST", "0.0.0.0"),
     port=int(os.environ.get("FILES_MCP_PORT", "8080")),
 )
@@ -100,8 +80,28 @@ async def move_file(path: str, subdir: str) -> dict:
     return await t.move_file(_reg(), path, subdir)
 
 
+async def _serve() -> None:
+    """Launch the watch daemons AND the streamable-http MCP server in one event
+    loop. The daemons must run at process startup (the auto-push path is the
+    primary job) — FastMCP's `lifespan` is the per-session MCP-protocol lifespan,
+    NOT the ASGI startup hook, so we start the daemons explicitly here."""
+    global _manager
+    config = load_config()
+    notifier = make_notifier(
+        os.environ.get("FILES_NOTIFY_WEBHOOK_URL") or None,
+        os.environ.get("FILES_NOTIFY_WEBHOOK_TOKEN") or None,
+    )
+    _manager = DaemonManager(config, notifier=notifier)
+    await _manager.start()
+    logger.info("watch daemons started for roots: %s", _manager.names())
+    try:
+        await mcp.run_streamable_http_async()
+    finally:
+        await _manager.stop()
+
+
 def main() -> None:
-    mcp.run(transport="streamable-http")
+    asyncio.run(_serve())
 
 
 if __name__ == "__main__":
