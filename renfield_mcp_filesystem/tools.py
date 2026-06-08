@@ -33,12 +33,17 @@ def split_path(path: str) -> tuple[str, str]:
 
 
 async def list_watch_folders(reg: DaemonManager) -> dict:
-    return {
-        "roots": [
-            {"name": name, "connected": (p.connected if (p := reg.get(name)) else False)}
-            for name in reg.names()
-        ]
-    }
+    roots = []
+    for name in reg.names():
+        p = reg.get(name)
+        roots.append(
+            {
+                "name": name,
+                "connected": p.connected if p else False,
+                "last_error": p.last_error if p else "unknown root",
+            }
+        )
+    return {"roots": roots}
 
 
 async def list_files(reg: DaemonManager, root: str, pattern: str | None = None) -> dict:

@@ -36,6 +36,17 @@ class FolderProvider(abc.ABC):
 
     def __init__(self, root_name: str):
         self.root_name = root_name
+        self._disconnect_hook = None
+
+    def set_disconnect_hook(self, cb) -> None:
+        """Register ``async cb(root_name, reason)`` called when the provider
+        loses its connection (before it reconnects). Used for operator notify."""
+        self._disconnect_hook = cb
+
+    @property
+    def last_error(self) -> str | None:
+        """The most recent connection/watch error, or None if healthy."""
+        return None
 
     @abc.abstractmethod
     async def start(self) -> None:

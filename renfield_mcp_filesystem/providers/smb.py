@@ -26,6 +26,11 @@ from .base import FileInfo, FolderProvider, SettledFile
 logger = logging.getLogger("renfield-mcp-filesystem.smb")
 
 
+def reconnect_delay(attempt: int, base: float = 2.0, cap: float = 60.0) -> float:
+    """Exponential backoff for SMB reconnect attempts, capped."""
+    return min(base * (2 ** attempt), cap)
+
+
 def classify_action(action: int) -> str:
     """Map an SMB ``FileAction`` to a settle-debouncer signal: a file appearing
     or being written is a ``"change"`` (arms/re-arms settle); a file going away
@@ -90,7 +95,14 @@ class SmbProvider(FolderProvider):
         self._notify_task: asyncio.Task | None = None
         self._dir_open = None
         self._connected = False
+        self._last_error: str | None = None
+        self._reconnect_base = 2.0
+        self._reconnect_cap = 60.0
         self._excluded = {root.processed_subdir, root.failed_subdir}
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
 
     # -- lifecycle --
 
@@ -113,7 +125,7 @@ class SmbProvider(FolderProvider):
             loop.call_soon_threadsafe(self._queue.put_nowait, SettledFile(name))
 
         self._debouncer = SettleDebouncer(self._settle_seconds, _emit)
-        self._notify_task = asyncio.create_task(self._notify_loop())
+        self._notify_task = asyncio.create_task(self._watch_with_reconnect())
         self._connected = True
 
     async def stop(self) -> None:
@@ -138,9 +150,33 @@ class SmbProvider(FolderProvider):
     def connected(self) -> bool:
         return self._connected
 
-    # -- CHANGE_NOTIFY loop (event-driven; verified at E2E) --
+    # -- CHANGE_NOTIFY loop (event-driven) with reconnect/backoff (T17) --
 
-    async def _notify_loop(self) -> None:
+    async def _watch_with_reconnect(self) -> None:
+        """Run the CHANGE_NOTIFY loop; on a disconnect/error, notify + reconnect
+        with exponential backoff (the #1 real-world SMB/NFS failure)."""
+        attempt = 0
+        while True:
+            try:
+                await self._notify_loop_once()  # runs until an error/disconnect
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._connected = False
+                self._last_error = str(exc)
+                logger.error("root %s: SMB watch disconnected: %s", self.root_name, exc)
+                if self._disconnect_hook is not None:
+                    try:
+                        await self._disconnect_hook(self.root_name, str(exc))
+                    except Exception:  # noqa: BLE001
+                        pass
+                delay = reconnect_delay(attempt, self._reconnect_base, self._reconnect_cap)
+                attempt += 1
+                await asyncio.sleep(delay)
+                continue
+            attempt = 0  # a clean return (only on shutdown) resets backoff
+
+    async def _notify_loop_once(self) -> None:
         from smbprotocol.change_notify import CompletionFilter, FileSystemWatcher
 
         flags = (
@@ -148,20 +184,16 @@ class SmbProvider(FolderProvider):
             | CompletionFilter.FILE_NOTIFY_CHANGE_LAST_WRITE
             | CompletionFilter.FILE_NOTIFY_CHANGE_CREATION
         )
-        try:
-            self._dir_open = await asyncio.to_thread(self._open_inbox_dir)
-            while True:
-                watcher = FileSystemWatcher(self._dir_open)
-                watcher.start(flags)
-                # result() blocks until the server reports a change — event-driven.
-                changes = await asyncio.to_thread(watcher.result)
-                for change in changes or []:
-                    self._handle_change(change)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - disconnect handling lands in T17
-            self._connected = False
-            logger.error("root %s: CHANGE_NOTIFY loop ended: %s", self.root_name, exc)
+        self._dir_open = await asyncio.to_thread(self._open_inbox_dir)
+        self._connected = True
+        self._last_error = None
+        while True:
+            watcher = FileSystemWatcher(self._dir_open)
+            watcher.start(flags)
+            # result() blocks until the server reports a change — event-driven.
+            changes = await asyncio.to_thread(watcher.result)
+            for change in changes or []:
+                self._handle_change(change)
 
     def _handle_change(self, change) -> None:
         # change.file_name is relative to the watched dir (the inbox).

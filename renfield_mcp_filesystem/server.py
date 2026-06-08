@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 from . import tools as t
 from .config import load_config
 from .daemon import DaemonManager
+from .notify import make_notifier
 
 logging.basicConfig(
     level=os.environ.get("FILES_LOG_LEVEL", "INFO"),
@@ -41,7 +42,11 @@ async def _lifespan(_server: FastMCP):
     on shutdown."""
     global _manager
     config = load_config()
-    _manager = DaemonManager(config)
+    notifier = make_notifier(
+        os.environ.get("FILES_NOTIFY_WEBHOOK_URL") or None,
+        os.environ.get("FILES_NOTIFY_WEBHOOK_TOKEN") or None,
+    )
+    _manager = DaemonManager(config, notifier=notifier)
     await _manager.start()
     try:
         yield {}

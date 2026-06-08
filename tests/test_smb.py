@@ -84,3 +84,19 @@ async def test_debouncer_cancel_all():
     d.cancel_all()
     await asyncio.sleep(0.05)
     assert emitted == []
+
+
+def test_reconnect_delay_backoff():
+    from renfield_mcp_filesystem.providers.smb import reconnect_delay
+    assert reconnect_delay(0, base=2, cap=60) == 2
+    assert reconnect_delay(1, base=2, cap=60) == 4
+    assert reconnect_delay(2, base=2, cap=60) == 8
+    assert reconnect_delay(10, base=2, cap=60) == 60  # capped
+
+
+def test_smb_last_error_default():
+    from renfield_mcp_filesystem.config import SmbRoot
+    from renfield_mcp_filesystem.providers.smb import SmbProvider
+    p = SmbProvider(SmbRoot(name="r", server="nas", share="S",
+                            username_env="U", password_env="P"))
+    assert p.last_error is None and p.connected is False

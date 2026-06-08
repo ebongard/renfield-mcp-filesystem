@@ -20,7 +20,9 @@ def _registry(tmp_path):
 async def test_list_watch_folders(tmp_path):
     reg = _registry(tmp_path)
     out = await t.list_watch_folders(reg)
-    assert out["roots"] == [{"name": "docs", "connected": False}]  # not started
+    assert out["roots"] == [
+        {"name": "docs", "connected": False, "last_error": None}  # not started
+    ]
 
 
 @pytest.mark.asyncio

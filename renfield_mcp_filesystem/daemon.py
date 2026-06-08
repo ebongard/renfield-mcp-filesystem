@@ -21,7 +21,8 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .config import Config, Root, load_roots
-from .engine import FailureHook, FatalHook, IngestEngine
+from .engine import IngestEngine
+from .notify import LogNotifier, Notifier
 from .providers.base import FolderProvider
 from .pusher import RenfieldPusher
 from .registry import make_provider
@@ -39,13 +40,11 @@ class DaemonManager:
         config: Config,
         *,
         provider_factory=make_provider,
-        on_failed: FailureHook | None = None,
-        on_fatal: FatalHook | None = None,
+        notifier: Notifier | None = None,
     ):
         self._config = config
         self._make_provider = provider_factory
-        self._on_failed = on_failed
-        self._on_fatal = on_fatal
+        self._notifier = notifier or LogNotifier()
         self._pusher = RenfieldPusher(
             config.renfield_url, config.ingest_token, config.push_timeout_seconds
         )
@@ -95,9 +94,10 @@ class DaemonManager:
 
     def _build_root(self, root: Root) -> None:
         provider = self._make_provider(root, self._config.settle_seconds)
+        provider.set_disconnect_hook(self._notifier.disconnect)
         engine = IngestEngine(
             config=self._config, root=root, provider=provider, pusher=self._pusher,
-            on_failed=self._on_failed, on_fatal=self._on_fatal,
+            on_failed=self._notifier.failure, on_fatal=self._notifier.fatal,
         )
         self._roots[root.name] = root
         self._providers[root.name] = provider
