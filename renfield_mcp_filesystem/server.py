@@ -23,7 +23,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import tools as t
 from .config import load_config
-from .registry import ProviderRegistry
+from .daemon import DaemonManager
 
 logging.basicConfig(
     level=os.environ.get("FILES_LOG_LEVEL", "INFO"),
@@ -32,29 +32,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("renfield-mcp-filesystem")
 
-_registry: ProviderRegistry | None = None
+_manager: DaemonManager | None = None
 
 
 @asynccontextmanager
 async def _lifespan(_server: FastMCP):
-    """Build the registry + launch the watcher daemons on startup; cancel them
+    """Start the watcher daemons (+ dynamic-roots reload) on startup; stop them
     on shutdown."""
-    global _registry
+    global _manager
     config = load_config()
-    _registry = ProviderRegistry(config)
-    engine_tasks = [asyncio.create_task(e.run()) for e in _registry.engines()]
-    logger.info("started %d watch root(s): %s", len(engine_tasks), _registry.names())
+    _manager = DaemonManager(config)
+    await _manager.start()
     try:
         yield {}
     finally:
-        for task in engine_tasks:
-            task.cancel()
-        await asyncio.gather(*engine_tasks, return_exceptions=True)
-        for engine in _registry.engines():
-            try:
-                await engine.stop()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("engine stop error: %s", exc)
+        await _manager.stop()
 
 
 mcp = FastMCP(
@@ -65,10 +57,10 @@ mcp = FastMCP(
 )
 
 
-def _reg() -> ProviderRegistry:
-    if _registry is None:
-        raise RuntimeError("provider registry not initialised")
-    return _registry
+def _reg() -> DaemonManager:
+    if _manager is None:
+        raise RuntimeError("daemon manager not initialised")
+    return _manager
 
 
 @mcp.tool()

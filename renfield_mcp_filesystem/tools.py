@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import os
 
-from .registry import ProviderRegistry
+from .daemon import DaemonManager
 
 # When truncate=True (interactive/LLM use) cap the returned content so the
 # base64 stays under the MCP-manager's 128 KB response cap. truncate=False
@@ -32,7 +32,7 @@ def split_path(path: str) -> tuple[str, str]:
     return root, relpath
 
 
-async def list_watch_folders(reg: ProviderRegistry) -> dict:
+async def list_watch_folders(reg: DaemonManager) -> dict:
     return {
         "roots": [
             {"name": name, "connected": (p.connected if (p := reg.get(name)) else False)}
@@ -41,7 +41,7 @@ async def list_watch_folders(reg: ProviderRegistry) -> dict:
     }
 
 
-async def list_files(reg: ProviderRegistry, root: str, pattern: str | None = None) -> dict:
+async def list_files(reg: DaemonManager, root: str, pattern: str | None = None) -> dict:
     provider = reg.get(root)
     if provider is None:
         return _err(f"unknown root: {root!r}")
@@ -55,7 +55,7 @@ async def list_files(reg: ProviderRegistry, root: str, pattern: str | None = Non
     }
 
 
-async def get_file_info(reg: ProviderRegistry, path: str) -> dict:
+async def get_file_info(reg: DaemonManager, path: str) -> dict:
     try:
         root, relpath = split_path(path)
     except ValueError as exc:
@@ -72,7 +72,7 @@ async def get_file_info(reg: ProviderRegistry, path: str) -> dict:
     return {"path": path, "relpath": relpath, "size": info.size, "mtime": info.mtime}
 
 
-async def read_file(reg: ProviderRegistry, path: str, truncate: bool = True) -> dict:
+async def read_file(reg: DaemonManager, path: str, truncate: bool = True) -> dict:
     try:
         root, relpath = split_path(path)
     except ValueError as exc:
@@ -100,7 +100,7 @@ async def read_file(reg: ProviderRegistry, path: str, truncate: bool = True) -> 
     }
 
 
-async def move_file(reg: ProviderRegistry, path: str, subdir: str) -> dict:
+async def move_file(reg: DaemonManager, path: str, subdir: str) -> dict:
     try:
         root, relpath = split_path(path)
     except ValueError as exc:

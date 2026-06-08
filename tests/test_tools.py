@@ -4,7 +4,7 @@ import pytest
 
 from renfield_mcp_filesystem import tools as t
 from renfield_mcp_filesystem.config import Config, LocalRoot
-from renfield_mcp_filesystem.registry import ProviderRegistry
+from renfield_mcp_filesystem.daemon import DaemonManager
 
 
 def _registry(tmp_path):
@@ -13,7 +13,7 @@ def _registry(tmp_path):
         allowed_extensions=("pdf", "txt"),
         roots=[LocalRoot(name="docs", path=str(tmp_path))],
     )
-    return ProviderRegistry(cfg)
+    return DaemonManager(cfg)
 
 
 @pytest.mark.asyncio
