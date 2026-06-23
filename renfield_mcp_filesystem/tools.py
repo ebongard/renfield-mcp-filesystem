@@ -120,7 +120,16 @@ async def move_file(reg: DaemonManager, path: str, subdir: str) -> dict:
     provider = reg.get(root)
     if provider is None:
         return _err(f"unknown root: {root!r}")
-    if not subdir or "/" in subdir or subdir in ("", ".", ".."):
+    # subdir must be a single, traversal-free path component. Reject BOTH
+    # separators (a `\`-separated `..\..\evil` previously slipped past a `/`-only
+    # check and escaped via _root_unc) plus drive/ADS colons (review H5 follow-up).
+    if (
+        not subdir
+        or "/" in subdir
+        or "\\" in subdir
+        or ":" in subdir
+        or subdir in (".", "..")
+    ):
         return _err(f"invalid subdir: {subdir!r}")
     try:
         new_rel = await provider.move_to_subdir(relpath, subdir)

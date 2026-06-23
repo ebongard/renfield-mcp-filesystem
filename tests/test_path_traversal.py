@@ -88,15 +88,47 @@ async def test_move_file_traversal_returns_error(tmp_path):
     assert "error" in out
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_subdir", [
+    r"..\..\evil",       # backslash traversal — the H5-followup escape
+    "../evil",           # forward-slash traversal
+    "a/b",               # nested
+    "C:evil",            # drive-relative
+    "file:ads",          # NTFS ADS
+    "..",
+    "",
+])
+async def test_move_file_rejects_unsafe_subdir(tmp_path, bad_subdir):
+    reg = _registry(tmp_path)
+    (tmp_path / "f.pdf").write_bytes(b"x")
+    out = await t.move_file(reg, "docs/f.pdf", bad_subdir)
+    assert "error" in out
+
+
 # ---- SMB provider defense in depth ----
 
-def test_smb_child_unc_rejects_traversal():
+def _smb_provider():
     from renfield_mcp_filesystem.config import SmbRoot
     from renfield_mcp_filesystem.providers.smb import SmbProvider
+    return SmbProvider(SmbRoot(name="r", server="nas", share="S",
+                               username_env="U", password_env="P"))
 
-    p = SmbProvider(SmbRoot(name="r", server="nas", share="S",
-                            username_env="U", password_env="P"))
+
+def test_smb_child_unc_rejects_traversal():
+    p = _smb_provider()
     with pytest.raises(ValueError):
         p._child_unc("../../etc/passwd")
     # A normal relpath still builds a UNC under the inbox.
     assert p._child_unc("file.pdf").startswith(r"\\nas\S")
+
+
+def test_smb_root_unc_rejects_traversal():
+    """_root_unc is the move/processed-dir sink — it must reject a traversal
+    smuggled through the dest path (e.g. a backslash subdir)."""
+    p = _smb_provider()
+    with pytest.raises(ValueError):
+        p._root_unc(r"..\..\evil/file.pdf")
+    with pytest.raises(ValueError):
+        p._root_unc("../../evil/file.pdf")
+    # The legitimate `<subdir>/<name>` dest still builds a share-root UNC.
+    assert p._root_unc("processed/file.pdf").startswith(r"\\nas\S")

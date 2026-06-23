@@ -272,7 +272,15 @@ class SmbProvider(FolderProvider):
         subdirs live here — siblings of the inbox, not nested under it — so a
         `path: incomming` root moves files to `<share>/processed`, giving the
         `<share>/{incomming,processed,failed}` layout. With `path: ""`
-        (watch the share root) this is identical to `_child_unc`."""
+        (watch the share root) this is identical to `_child_unc`.
+
+        Guarded by ``safe_relpath`` (review H5 follow-up): the only caller builds
+        ``<subdir>/<name>``, so a traversal smuggled through ``subdir`` (e.g. the
+        backslash-separated ``..\\..\\evil`` that the tool-layer ``/``-only check
+        missed) would otherwise reach the SMB server as ``..`` here. Normalizing
+        ``\\``→``/`` and rejecting any ``..`` segment closes the move/write escape.
+        """
+        relpath = safe_relpath(relpath)
         return _unc(self._root.server, self._root.share, relpath)
 
     async def stat(self, relpath: str) -> FileInfo | None:
