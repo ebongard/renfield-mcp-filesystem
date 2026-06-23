@@ -13,6 +13,7 @@ import base64
 import os
 
 from .daemon import DaemonManager
+from .providers.base import safe_relpath
 
 # When truncate=True (interactive/LLM use) cap the returned content so the
 # base64 stays under the MCP-manager's 128 KB response cap. truncate=False
@@ -25,10 +26,16 @@ def _err(msg: str) -> dict:
 
 
 def split_path(path: str) -> tuple[str, str]:
-    """Split a qualified ``"<root>/<relpath>"`` into (root, relpath)."""
+    """Split a qualified ``"<root>/<relpath>"`` into (root, relpath).
+
+    The relpath is validated against traversal (review H5) — ``..``/absolute/
+    drive/UNC/ADS are rejected here so no tool entrypoint can escape the root,
+    independent of the provider's own guard.
+    """
     root, sep, relpath = (path or "").partition("/")
     if not sep or not root or not relpath:
         raise ValueError("path must be '<root>/<relpath>'")
+    relpath = safe_relpath(relpath)
     return root, relpath
 
 

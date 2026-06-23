@@ -12,6 +12,35 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 
+def safe_relpath(relpath: str) -> str:
+    """Validate a root-relative path, rejecting anything that could escape the
+    watch root. Raises ``ValueError`` on:
+
+    - empty / whitespace-only paths,
+    - absolute paths (leading ``/`` or ``\\``),
+    - drive letters / UNC prefixes / NTFS alternate-data-streams (any ``:``),
+    - ``..`` traversal in any segment (``/`` or ``\\`` separated).
+
+    Security (review H5): the ``LocalProvider`` self-guards via ``_resolve``
+    (realpath + commonpath), but the ``SmbProvider`` built UNC paths straight
+    from the relpath, preserving ``..`` for the SMB server to resolve — an
+    arbitrary-file-read escape from the inbox. This is the shared choke-point
+    guard, applied both at the tool boundary (``split_path``) and inside the
+    SMB provider as defense in depth. Returns the stripped relpath on success.
+    """
+    rp = (relpath or "").strip()
+    if not rp:
+        raise ValueError("empty relpath")
+    if rp.startswith(("/", "\\")):
+        raise ValueError(f"absolute path rejected: {relpath!r}")
+    if ":" in rp:
+        raise ValueError(f"path traversal rejected: {relpath!r}")
+    segments = rp.replace("\\", "/").split("/")
+    if any(seg == ".." for seg in segments):
+        raise ValueError(f"path traversal rejected: {relpath!r}")
+    return rp
+
+
 @dataclass(frozen=True)
 class FileInfo:
     """A file in a root, addressed by its path relative to the root inbox."""
