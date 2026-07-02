@@ -100,6 +100,35 @@ class Config(BaseModel):
     push_timeout_seconds: float = 120.0
     roots_path: str | None = None  # the mounted roots.yaml (for reload)
     roots: list[Root] = Field(default_factory=list)
+    # Bound concurrent pushes across ALL roots + retries so a large first-run
+    # backlog (or a retry storm during a backend slowdown) can't fan out into a
+    # flood of simultaneous ingest requests. A defense-in-depth cap: the backend
+    # is the authority on its own load, but the MCP shouldn't be the source of a
+    # thundering herd. Shared by every engine via the daemon.
+    max_concurrent_pushes: int = 4
+    # Backend health poll (recovery detector, NOT a filesystem poll). On a
+    # down→up transition the daemon re-reconciles every root so files left in the
+    # inbox after retry-exhaustion during a backend outage/restart are re-tried
+    # WITHOUT a manual MCP restart. 0 disables the poller.
+    health_poll_seconds: float = 30.0
+    # A backend RETRY means the document is still being processed (an OCR
+    # backlog), NOT a transient error — it WILL get a terminal response once its
+    # own indexing completes. Give it a far larger retry budget than a local
+    # processing error so a minutes-to-hours backlog doesn't exhaust the small
+    # transient cap (`max_retries`) and strand the file in the inbox — the
+    # 2026-07-02 stranding, where a 66-doc burst kept re-pushes returning RETRY
+    # long past ~30s. Bounded (not infinite) so a genuinely stuck document
+    # eventually notifies the operator; the delay is capped so the interval
+    # plateaus rather than growing unboundedly (default ~8h at the cap).
+    backend_retry_max_attempts: int = Field(default=480, ge=1)
+    # gt=0 so a misconfigured 0 can't turn the backoff into a zero-delay busy loop.
+    retry_max_delay_seconds: float = Field(default=60.0, gt=0)
+    # A file that is 0 bytes at settle time is almost always a mid-copy read
+    # (SMB has no CLOSE_WRITE, so the settle debouncer can fire between write
+    # chunks). Retry a few times to let the copy finish rather than immediately
+    # terminal-rejecting it to failed/; only a file that stays 0 bytes across
+    # this whole budget is treated as genuinely empty.
+    empty_retry_max_attempts: int = Field(default=8, ge=1)
 
     @property
     def max_file_size_bytes(self) -> int:
@@ -146,6 +175,17 @@ def load_config() -> Config:
         settle_seconds=float(os.environ.get("FILES_SETTLE_SECONDS", "2.0")),
         max_file_size_mb=int(os.environ.get("FILES_MAX_FILE_SIZE_MB", "50")),
         push_timeout_seconds=float(os.environ.get("FILES_PUSH_TIMEOUT_SECONDS", "120")),
+        max_concurrent_pushes=int(os.environ.get("FILES_MAX_CONCURRENT_PUSHES", "4")),
+        health_poll_seconds=float(os.environ.get("FILES_HEALTH_POLL_SECONDS", "30")),
+        backend_retry_max_attempts=int(
+            os.environ.get("FILES_BACKEND_RETRY_MAX_ATTEMPTS", "480")
+        ),
+        retry_max_delay_seconds=float(
+            os.environ.get("FILES_RETRY_MAX_DELAY_SECONDS", "60")
+        ),
+        empty_retry_max_attempts=int(
+            os.environ.get("FILES_EMPTY_RETRY_MAX_ATTEMPTS", "8")
+        ),
         roots_path=roots_path,
         roots=roots,
     )
