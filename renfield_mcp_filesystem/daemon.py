@@ -48,6 +48,9 @@ class DaemonManager:
         self._pusher = RenfieldPusher(
             config.renfield_url, config.ingest_token, config.push_timeout_seconds
         )
+        # Shared push-concurrency limiter across ALL roots + retries — a burst /
+        # retry-storm can't fan out into a flood of simultaneous ingest requests.
+        self._push_sem = asyncio.Semaphore(config.max_concurrent_pushes)
         self._roots: dict[str, Root] = {}
         self._providers: dict[str, FolderProvider] = {}
         self._engines: dict[str, IngestEngine] = {}
@@ -55,6 +58,10 @@ class DaemonManager:
         self._yaml_observer: Observer | None = None
         self._reload_handle: asyncio.TimerHandle | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Backend-recovery detector. Assume healthy at boot (startup reconcile
+        # just ran), so only a genuine down→up transition re-reconciles.
+        self._healthy = True
+        self._health_task: asyncio.Task | None = None
         for root in config.roots:
             self._build_root(root)
 
@@ -66,9 +73,15 @@ class DaemonManager:
             self._launch(name)
         if self._config.roots_path:
             self._watch_yaml(self._config.roots_path)
+        if self._config.health_poll_seconds > 0:
+            self._health_task = asyncio.create_task(self._health_poll_loop())
         logger.info("daemon started with roots: %s", self.names())
 
     async def stop(self) -> None:
+        if self._health_task is not None:
+            self._health_task.cancel()
+            await asyncio.gather(self._health_task, return_exceptions=True)
+            self._health_task = None
         if self._yaml_observer is not None:
             self._yaml_observer.stop()
             await asyncio.to_thread(self._yaml_observer.join, 5)
@@ -98,6 +111,7 @@ class DaemonManager:
         engine = IngestEngine(
             config=self._config, root=root, provider=provider, pusher=self._pusher,
             on_failed=self._notifier.failure, on_fatal=self._notifier.fatal,
+            push_semaphore=self._push_sem,
         )
         self._roots[root.name] = root
         self._providers[root.name] = provider
@@ -136,6 +150,38 @@ class DaemonManager:
                 await self._stop_root(name)
                 self._build_root(root)
                 self._launch(name)
+
+    # -- backend-recovery detector (re-reconcile on down→up) --
+
+    async def _health_poll_loop(self) -> None:
+        """Poll the backend health endpoint; on a down→up transition re-reconcile
+        every root. This un-sticks files left in the inbox after retry-exhaustion
+        during a backend outage/restart WITHOUT a manual MCP restart — the
+        specific failure this hardening targets. It is a backend-liveness probe
+        (like a readiness check), NOT a filesystem poll: detection stays
+        event-driven; this only reacts to the backend coming back."""
+        interval = self._config.health_poll_seconds
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                healthy = await self._pusher.health()
+                if healthy and not self._healthy:
+                    logger.info(
+                        "backend recovered (health OK) — re-reconciling %d root(s)",
+                        len(self._engines),
+                    )
+                    for engine in list(self._engines.values()):
+                        try:
+                            await engine.reconcile()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("recovery reconcile failed: %s", exc)
+                elif not healthy and self._healthy:
+                    logger.warning("backend health check failing — will re-reconcile on recovery")
+                self._healthy = healthy
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:  # noqa: BLE001 - never let the poller die
+                logger.warning("health poll error: %s", exc)
 
     # -- yaml watch (event-driven reload trigger) --
 

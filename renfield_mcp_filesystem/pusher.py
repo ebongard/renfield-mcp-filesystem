@@ -21,6 +21,7 @@ import httpx
 from .contract import (
     CONTRACT_HEADER,
     FOLDER_INGEST_CONTRACT_VERSION,
+    HEALTH_PATH,
     INGEST_PATH,
     MoveAction,
     move_action_for,
@@ -41,12 +42,27 @@ class PushOutcome:
 
 class RenfieldPusher:
     def __init__(self, renfield_url: str, ingest_token: str, timeout_seconds: float = 120.0):
-        self._url = renfield_url.rstrip("/") + INGEST_PATH
+        base = renfield_url.rstrip("/")
+        self._url = base + INGEST_PATH
+        self._health_url = base + HEALTH_PATH
         self._headers = {
             "Authorization": f"Bearer {ingest_token}",
             CONTRACT_HEADER: FOLDER_INGEST_CONTRACT_VERSION,
         }
         self._timeout = timeout_seconds
+
+    async def health(self) -> bool:
+        """Liveness probe against the folder-ingest health endpoint. True only on
+        a 200 (backend up AND the token is accepted). Used by the daemon's
+        recovery detector: a down→up transition re-reconciles the roots. A wrong
+        token (401/403) reads as unhealthy — correct, since it needs operator
+        action, not an auto re-reconcile. Never raises."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(self._health_url, headers=self._headers)
+            return resp.status_code == 200
+        except httpx.HTTPError:
+            return False
 
     async def push(
         self,

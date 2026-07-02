@@ -51,6 +51,7 @@ class IngestEngine:
         on_fatal: FatalHook | None = None,
         max_retries: int = 5,
         retry_base_seconds: float = 2.0,
+        push_semaphore: asyncio.Semaphore | None = None,
     ):
         self._config = config
         self._root = root
@@ -60,6 +61,10 @@ class IngestEngine:
         self._on_fatal = on_fatal
         self._max_retries = max_retries
         self._retry_base = retry_base_seconds
+        # Shared across all roots + retries (built by the daemon) so a burst can
+        # never fan out into a flood of simultaneous pushes. A no-op unbounded
+        # fallback keeps the engine usable standalone (tests).
+        self._push_sem = push_semaphore or asyncio.Semaphore(2**31)
         self._inflight: set[str] = set()
         self._retry_tasks: set[asyncio.Task] = set()
         self._stopped = asyncio.Event()
@@ -78,6 +83,15 @@ class IngestEngine:
         for t in list(self._retry_tasks):
             t.cancel()
         await self._provider.stop()
+
+    async def reconcile(self) -> None:
+        """Re-run the one-shot inbox catch-up on demand — the daemon calls this
+        when the backend recovers (down→up), so files left in the inbox after
+        retry-exhaustion during the outage are re-attempted WITHOUT a restart.
+        A no-op on a stopped root (a fatal token error needs operator action)."""
+        if self._stopped.is_set():
+            return
+        await self._reconcile_existing()
 
     async def _reconcile_existing(self) -> None:
         """One-shot startup catch-up (NOT a poll). See module docstring."""
@@ -124,14 +138,18 @@ class IngestEngine:
             data = await self._provider.read_bytes(relpath)
             sha = hashlib.sha256(data).hexdigest()
             mime = mimetypes.guess_type(relpath)[0]
-            outcome = await self._pusher.push(
-                file_bytes=data,
-                filename=os.path.basename(relpath),
-                root=self._root.name,
-                relpath=relpath,
-                sha256=sha,
-                mime=mime,
-            )
+            # Bound concurrent pushes across all roots + retries (defense-in-depth
+            # against a backlog/retry-storm flooding the backend). Held only for
+            # the network round-trip, not the local read/hash above.
+            async with self._push_sem:
+                outcome = await self._pusher.push(
+                    file_bytes=data,
+                    filename=os.path.basename(relpath),
+                    root=self._root.name,
+                    relpath=relpath,
+                    sha256=sha,
+                    mime=mime,
+                )
             await self._apply_outcome(relpath, attempt, outcome)
         except Exception as exc:  # noqa: BLE001 - never drop a file on a bug
             logger.exception("root %s: error processing %s: %s", self._root.name, relpath, exc)

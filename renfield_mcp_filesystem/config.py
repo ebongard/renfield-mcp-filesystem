@@ -100,6 +100,17 @@ class Config(BaseModel):
     push_timeout_seconds: float = 120.0
     roots_path: str | None = None  # the mounted roots.yaml (for reload)
     roots: list[Root] = Field(default_factory=list)
+    # Bound concurrent pushes across ALL roots + retries so a large first-run
+    # backlog (or a retry storm during a backend slowdown) can't fan out into a
+    # flood of simultaneous ingest requests. A defense-in-depth cap: the backend
+    # is the authority on its own load, but the MCP shouldn't be the source of a
+    # thundering herd. Shared by every engine via the daemon.
+    max_concurrent_pushes: int = 4
+    # Backend health poll (recovery detector, NOT a filesystem poll). On a
+    # down→up transition the daemon re-reconciles every root so files left in the
+    # inbox after retry-exhaustion during a backend outage/restart are re-tried
+    # WITHOUT a manual MCP restart. 0 disables the poller.
+    health_poll_seconds: float = 30.0
 
     @property
     def max_file_size_bytes(self) -> int:
@@ -146,6 +157,8 @@ def load_config() -> Config:
         settle_seconds=float(os.environ.get("FILES_SETTLE_SECONDS", "2.0")),
         max_file_size_mb=int(os.environ.get("FILES_MAX_FILE_SIZE_MB", "50")),
         push_timeout_seconds=float(os.environ.get("FILES_PUSH_TIMEOUT_SECONDS", "120")),
+        max_concurrent_pushes=int(os.environ.get("FILES_MAX_CONCURRENT_PUSHES", "4")),
+        health_poll_seconds=float(os.environ.get("FILES_HEALTH_POLL_SECONDS", "30")),
         roots_path=roots_path,
         roots=roots,
     )

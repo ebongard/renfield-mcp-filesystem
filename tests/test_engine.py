@@ -214,3 +214,60 @@ async def test_empty_or_dir_level_event_never_moves_the_inbox(bad):
     await eng._dispatch(bad)
     assert prov.moved == []
     assert push.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_redispatches_inbox_files():
+    # Public reconcile() re-runs the one-shot inbox catch-up on demand (the
+    # daemon calls it on backend recovery). A file left in the inbox is pushed.
+    prov = FakeProvider({"left.pdf": b"%PDF"}, existing=["left.pdf"])
+    push = FakePusher(PushOutcome(move=MoveAction.PROCESSED, status="ingested"))
+    eng = _engine(prov, push)
+    await prov.start()
+    await eng.reconcile()
+    assert prov.moved == [("left.pdf", "processed")]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_noop_when_stopped():
+    # A fatally-stopped root (token error) must NOT be re-reconciled — that needs
+    # operator action, not an auto retry.
+    prov = FakeProvider({"left.pdf": b"%PDF"}, existing=["left.pdf"])
+    push = FakePusher(PushOutcome(move=MoveAction.PROCESSED))
+    eng = _engine(prov, push)
+    await eng.stop()  # sets _stopped
+    await eng.reconcile()
+    assert prov.moved == []
+    assert push.calls == []
+
+
+@pytest.mark.asyncio
+async def test_push_semaphore_bounds_concurrency():
+    # With a shared semaphore of 1, two concurrent dispatches must not push at
+    # the same time (the flood-prevention property).
+    import asyncio
+
+    sem = asyncio.Semaphore(1)
+    concurrent = 0
+    peak = 0
+
+    class SlowPusher:
+        calls = []
+
+        async def push(self, **kwargs):
+            nonlocal concurrent, peak
+            concurrent += 1
+            peak = max(peak, concurrent)
+            await asyncio.sleep(0.02)
+            concurrent -= 1
+            SlowPusher.calls.append(kwargs)
+            return PushOutcome(move=MoveAction.PROCESSED)
+
+    prov = FakeProvider({"a.pdf": b"%PDF", "b.pdf": b"%PDF"})
+    eng = IngestEngine(
+        config=_cfg(), root=LocalRoot(name="r", path="/watch"), provider=prov,
+        pusher=SlowPusher(), push_semaphore=sem,
+    )
+    await asyncio.gather(eng._dispatch("a.pdf"), eng._dispatch("b.pdf"))
+    assert peak == 1  # semaphore of 1 serialized the two pushes
+    assert len(SlowPusher.calls) == 2
