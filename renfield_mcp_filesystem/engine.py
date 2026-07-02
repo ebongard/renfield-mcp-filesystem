@@ -81,6 +81,11 @@ class IngestEngine:
         # fallback keeps the engine usable standalone (tests).
         self._push_sem = push_semaphore or asyncio.Semaphore(2**31)
         self._inflight: set[str] = set()
+        # relpath -> (last retry reason, CONSECUTIVE count of that reason). The
+        # budget is per consecutive-reason run, not a single cumulative counter,
+        # so a lone spurious 0-byte read mid-backend-retry can't inherit the high
+        # backend count and trip the tiny empty cap (see _schedule_retry).
+        self._retry_state: dict[str, tuple[str, int]] = {}
         self._retry_tasks: set[asyncio.Task] = set()
         self._stopped = asyncio.Event()
 
@@ -137,13 +142,13 @@ class IngestEngine:
         if relpath in self._inflight:
             return
         self._inflight.add(relpath)
-        await self._process(relpath, attempt=0)
+        await self._process(relpath)
 
-    async def _process(self, relpath: str, attempt: int) -> None:
+    async def _process(self, relpath: str) -> None:
         try:
             info = await self._provider.stat(relpath)
             if info is None:
-                self._inflight.discard(relpath)  # already moved / vanished
+                self._release(relpath)  # already moved / vanished
                 return
             ok, reason = classify(self._config, relpath, info.size)
             if not ok:
@@ -153,7 +158,7 @@ class IngestEngine:
                     # write chunks). Retry to let the copy finish instead of
                     # terminal-rejecting; a file that stays empty across the
                     # budget fails in _schedule_retry.
-                    await self._schedule_retry(relpath, attempt, "empty")
+                    await self._schedule_retry(relpath, "empty")
                     return
                 await self._move(relpath, MoveAction.FAILED, reason or "rejected")
                 return
@@ -173,14 +178,14 @@ class IngestEngine:
                     sha256=sha,
                     mime=mime,
                 )
-            await self._apply_outcome(relpath, attempt, outcome)
+            await self._apply_outcome(relpath, outcome)
         except Exception as exc:  # noqa: BLE001 - never drop a file on a bug
             logger.exception("root %s: error processing %s: %s", self._root.name, relpath, exc)
-            await self._schedule_retry(relpath, attempt, "processing_error")
+            await self._schedule_retry(relpath, "processing_error")
 
-    async def _apply_outcome(self, relpath: str, attempt: int, outcome: PushOutcome) -> None:
+    async def _apply_outcome(self, relpath: str, outcome: PushOutcome) -> None:
         if outcome.fatal:
-            self._inflight.discard(relpath)
+            self._release(relpath)
             self._stopped.set()  # token/config error affects the whole root
             logger.error("root %s: fatal push outcome — stopping root", self._root.name)
             if self._on_fatal is not None:
@@ -191,7 +196,13 @@ class IngestEngine:
         elif outcome.move is MoveAction.FAILED:
             await self._move(relpath, MoveAction.FAILED, outcome.detail or outcome.status or "failed")
         else:  # LEAVE → bounded retry
-            await self._schedule_retry(relpath, attempt, "retry")
+            await self._schedule_retry(relpath, "retry")
+
+    def _release(self, relpath: str) -> None:
+        """Drop all per-file processing state (a file has reached a terminal
+        outcome or vanished). Keeps _inflight and _retry_state from leaking."""
+        self._inflight.discard(relpath)
+        self._retry_state.pop(relpath, None)
 
     async def _move(self, relpath: str, action: MoveAction, reason: str) -> None:
         subdir = (
@@ -203,20 +214,29 @@ class IngestEngine:
             new_rel = await self._provider.move_to_subdir(relpath, subdir)
             logger.info("root %s: %s → %s (%s)", self._root.name, relpath, new_rel, reason)
         finally:
-            self._inflight.discard(relpath)
+            self._release(relpath)
         if action is MoveAction.FAILED and self._on_failed is not None:
             await self._on_failed(self._root.name, relpath, reason)
 
-    async def _schedule_retry(self, relpath: str, attempt: int, reason: str) -> None:
-        # Budget by reason: a backend "retry" (doc still OCR'ing) survives a long
-        # backlog; a local processing_error is capped tight; an "empty" 0-byte
-        # read gets a short wait then FAILS if it never gains bytes.
+    async def _schedule_retry(self, relpath: str, reason: str) -> None:
+        # Budget by reason, counted per CONSECUTIVE run of that reason (NOT a
+        # single cumulative counter). _process re-stats on every attempt, so a
+        # lone spurious 0-byte read during a long backend-retry run must not
+        # inherit that run's high count and instantly trip the tiny empty cap —
+        # which would move a real, already-pushed document to failed/. A reason
+        # change resets the count. Budgets: backend "retry" (doc still OCR'ing)
+        # survives a long backlog; local processing_error is capped tight; an
+        # "empty" 0-byte read gets a short wait then FAILS if it never gains bytes.
         cap = {
             "retry": self._backend_retry_max,
             "empty": self._empty_retry_max,
         }.get(reason, self._max_retries)
 
-        if attempt + 1 >= cap:
+        prev_reason, count = self._retry_state.get(relpath, (None, 0))
+        count = count + 1 if prev_reason == reason else 1
+
+        if count >= cap:
+            self._retry_state.pop(relpath, None)
             if reason == "empty":
                 # Stayed 0 bytes across the whole wait → genuinely empty. Terminal.
                 logger.warning(
@@ -236,18 +256,19 @@ class IngestEngine:
                 await self._on_failed(self._root.name, relpath, f"retry_exhausted: {reason}")
             return
 
-        # Exponential backoff, capped so the interval plateaus (a 480-attempt
-        # backend budget must not compute 2**479 or sleep for years). Clamp the
-        # exponent before the (Python big-int) shift, then clamp the delay.
-        delay = min(self._retry_max_delay, self._retry_base * (2 ** min(attempt, 16)))
+        self._retry_state[relpath] = (reason, count)
+        # Exponential backoff on the consecutive count, capped so the interval
+        # plateaus (a 480-attempt backend budget must not compute 2**479 or sleep
+        # for years). Clamp the exponent before the (big-int) shift, then the delay.
+        delay = min(self._retry_max_delay, self._retry_base * (2 ** min(count - 1, 16)))
 
         async def _later() -> None:
             try:
                 await asyncio.sleep(delay)
                 if self._stopped.is_set():
-                    self._inflight.discard(relpath)
+                    self._release(relpath)
                     return
-                await self._process(relpath, attempt + 1)  # stays inflight across the wait
+                await self._process(relpath)  # stays inflight across the wait
             finally:
                 self._retry_tasks.discard(asyncio.current_task())
 

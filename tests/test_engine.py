@@ -182,6 +182,41 @@ async def test_retry_then_exhausts_and_notifies():
 
 
 @pytest.mark.asyncio
+async def test_transient_empty_during_backend_retry_does_not_fail():
+    # REGRESSION: a file backend-retrying (doc still OCR'ing) that reads 0 bytes
+    # on ONE stat (a momentary SMB/truncation glitch) must NOT be terminally
+    # moved to failed/ as "empty". The empty budget counts CONSECUTIVE empty
+    # reads; a reason change resets the count, so a lone 0-byte read can't inherit
+    # the high backend-retry count and instantly trip the tiny empty cap.
+    class FlakyStatProvider(FakeProvider):
+        def __init__(self, files):
+            super().__init__(files)
+            self._n = 0
+
+        async def stat(self, relpath):
+            self._n += 1
+            if self._n == 2:  # a single spurious 0-byte read on the 2nd check
+                return FileInfo(relpath, 0, 0.0)
+            return await super().stat(relpath)
+
+    prov = FlakyStatProvider({"a.pdf": b"%PDF"})
+    push = FakePusher(PushOutcome(move=MoveAction.LEAVE))  # backend still OCR'ing
+    failures = []
+
+    async def on_failed(root, relpath, reason):
+        failures.append((root, relpath, reason))
+
+    eng = _engine(prov, push, on_failed=on_failed, max_retries=2,
+                  backend_retry_max=5, empty_retry_max=2)
+    await eng._dispatch("a.pdf")
+    await asyncio.sleep(0.1)
+    assert ("a.pdf", "failed") not in prov.moved  # never wrongly failed as empty
+    assert not any("empty" in r[2] for r in failures)
+    # It exhausts the BACKEND budget instead and is left in the inbox.
+    assert failures and "retry_exhausted: retry" in failures[-1][2]
+
+
+@pytest.mark.asyncio
 async def test_backend_retry_uses_larger_budget_than_transient_cap():
     # A LEAVE = backend RETRY (doc still OCR'ing). It must use the LARGE backend
     # budget, not the small transient-error cap, so a minutes-long inbox backlog

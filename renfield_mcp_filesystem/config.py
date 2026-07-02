@@ -120,14 +120,15 @@ class Config(BaseModel):
     # long past ~30s. Bounded (not infinite) so a genuinely stuck document
     # eventually notifies the operator; the delay is capped so the interval
     # plateaus rather than growing unboundedly (default ~8h at the cap).
-    backend_retry_max_attempts: int = 480
-    retry_max_delay_seconds: float = 60.0
+    backend_retry_max_attempts: int = Field(default=480, ge=1)
+    # gt=0 so a misconfigured 0 can't turn the backoff into a zero-delay busy loop.
+    retry_max_delay_seconds: float = Field(default=60.0, gt=0)
     # A file that is 0 bytes at settle time is almost always a mid-copy read
     # (SMB has no CLOSE_WRITE, so the settle debouncer can fire between write
     # chunks). Retry a few times to let the copy finish rather than immediately
     # terminal-rejecting it to failed/; only a file that stays 0 bytes across
     # this whole budget is treated as genuinely empty.
-    empty_retry_max_attempts: int = 8
+    empty_retry_max_attempts: int = Field(default=8, ge=1)
 
     @property
     def max_file_size_bytes(self) -> int:
