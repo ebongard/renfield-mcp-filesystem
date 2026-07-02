@@ -112,6 +112,9 @@ class DaemonManager:
             config=self._config, root=root, provider=provider, pusher=self._pusher,
             on_failed=self._notifier.failure, on_fatal=self._notifier.fatal,
             push_semaphore=self._push_sem,
+            backend_retry_max=self._config.backend_retry_max_attempts,
+            empty_retry_max=self._config.empty_retry_max_attempts,
+            retry_max_delay=self._config.retry_max_delay_seconds,
         )
         self._roots[root.name] = root
         self._providers[root.name] = provider

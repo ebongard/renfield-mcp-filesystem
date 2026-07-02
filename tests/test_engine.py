@@ -67,11 +67,17 @@ def _cfg(max_mb=50):
     )
 
 
-def _engine(provider, pusher, *, on_failed=None, on_fatal=None, max_retries=3, retry_base=0.001):
+def _engine(provider, pusher, *, on_failed=None, on_fatal=None, max_retries=3,
+            retry_base=0.001, backend_retry_max=None, empty_retry_max=None):
+    # In tests the differentiated budgets default to max_retries (so a single
+    # small cap keeps the async retry loops short) unless a test overrides them.
     return IngestEngine(
         config=_cfg(), root=LocalRoot(name="r", path="/watch"), provider=provider,
         pusher=pusher, on_failed=on_failed, on_fatal=on_fatal,
         max_retries=max_retries, retry_base_seconds=retry_base,
+        backend_retry_max=max_retries if backend_retry_max is None else backend_retry_max,
+        empty_retry_max=max_retries if empty_retry_max is None else empty_retry_max,
+        retry_max_delay=0.001,
     )
 
 
@@ -111,13 +117,31 @@ async def test_oversize_moves_to_failed_without_push():
 
 
 @pytest.mark.asyncio
-async def test_empty_file_moves_to_failed_without_push():
+async def test_empty_file_retries_then_fails():
+    # 0 bytes at settle = likely a mid-copy read (SMB has no CLOSE_WRITE). The
+    # engine retries a few times to let the copy finish; a file that stays empty
+    # across the budget is genuinely empty → failed/ (never pushed).
     prov = FakeProvider({"e.pdf": b""})
     push = FakePusher(PushOutcome(move=MoveAction.PROCESSED))
-    eng = _engine(prov, push)
+    eng = _engine(prov, push, empty_retry_max=3)
     await eng._dispatch("e.pdf")
+    await asyncio.sleep(0.05)  # let the empty-wait retries run
     assert prov.moved == [("e.pdf", "failed")]
-    assert push.calls == []
+    assert push.calls == []  # never pushed an empty file
+
+
+@pytest.mark.asyncio
+async def test_empty_then_populated_is_pushed():
+    # A file that is 0 bytes at first stat but has content by a later retry (the
+    # copy finished) gets pushed, not failed.
+    prov = FakeProvider({"e.pdf": b""})
+    push = FakePusher(PushOutcome(move=MoveAction.PROCESSED, status="ingested"))
+    eng = _engine(prov, push, empty_retry_max=5)
+    await eng._dispatch("e.pdf")
+    prov.files["e.pdf"] = b"%PDF now has bytes"  # copy completes after first check
+    await asyncio.sleep(0.05)
+    assert prov.moved == [("e.pdf", "processed")]
+    assert len(push.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -152,9 +176,29 @@ async def test_retry_then_exhausts_and_notifies():
     eng = _engine(prov, push, on_failed=on_failed, max_retries=3, retry_base=0.001)
     await eng._dispatch("a.pdf")
     await asyncio.sleep(0.05)  # let the bounded backoff retries run
-    assert len(push.calls) == 3  # attempt 0 + 2 retries (cap = max_retries)
+    assert len(push.calls) == 3  # attempt 0 + 2 retries (cap = backend_retry_max)
     assert prov.moved == []  # never moved — left in inbox
     assert failures and "retry_exhausted" in failures[0][2]
+
+
+@pytest.mark.asyncio
+async def test_backend_retry_uses_larger_budget_than_transient_cap():
+    # A LEAVE = backend RETRY (doc still OCR'ing). It must use the LARGE backend
+    # budget, not the small transient-error cap, so a minutes-long inbox backlog
+    # can't strand the file. Here backend_retry_max=6 > max_retries=2.
+    prov = FakeProvider({"a.pdf": b"%PDF"})
+    push = FakePusher(PushOutcome(move=MoveAction.LEAVE))  # always retry
+    failures = []
+
+    async def on_failed(root, relpath, reason):
+        failures.append((root, relpath, reason))
+
+    eng = _engine(prov, push, on_failed=on_failed, max_retries=2, backend_retry_max=6)
+    await eng._dispatch("a.pdf")
+    await asyncio.sleep(0.1)
+    assert len(push.calls) == 6  # used backend_retry_max=6, not max_retries=2
+    assert prov.moved == []  # left in inbox for the next reconcile
+    assert failures and "retry_exhausted: retry" in failures[0][2]
 
 
 @pytest.mark.asyncio

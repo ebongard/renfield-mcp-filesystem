@@ -7,10 +7,15 @@ Detection is event-driven (NEVER a poll loop). Two non-poll complements:
      invisible forever. We enumerate the inbox ONCE at startup and dispatch those
      files, then rely purely on events. This is a single catch-up, not a periodic
      scan.
-  2. **Bounded per-file retry** — a ``retry`` response (worker down / in-flight)
-     leaves the file in place and re-attempts THAT file on an exponential backoff
-     (a retry schedule for one known unit of work, not a filesystem poll). After
-     the cap we give up and leave it (the next restart's reconciliation re-tries).
+  2. **Bounded per-file retry** — a ``retry`` response leaves the file in place
+     and re-attempts THAT file on a capped exponential backoff (a retry schedule
+     for one known unit of work, not a filesystem poll). Budgets differ by reason
+     (see ``_schedule_retry``): a backend ``retry`` (the document is still being
+     OCR'd — an inbox burst can keep re-pushes returning RETRY for many minutes)
+     gets a LARGE budget so the backlog doesn't strand it; a local processing
+     error is capped tight; a 0-byte ``empty`` read (mid-copy on CLOSE_WRITE-less
+     SMB) gets a short wait then fails only if it never gains bytes. After the
+     backend/error cap we give up and leave it (the next reconcile re-tries).
 
 Local size + extension gating happens HERE, before any push (security: never
 upload an oversized / disallowed file — the backend would reject it anyway).
@@ -51,6 +56,9 @@ class IngestEngine:
         on_fatal: FatalHook | None = None,
         max_retries: int = 5,
         retry_base_seconds: float = 2.0,
+        backend_retry_max: int = 480,
+        empty_retry_max: int = 8,
+        retry_max_delay: float = 60.0,
         push_semaphore: asyncio.Semaphore | None = None,
     ):
         self._config = config
@@ -59,8 +67,15 @@ class IngestEngine:
         self._pusher = pusher
         self._on_failed = on_failed
         self._on_fatal = on_fatal
+        # Differentiated retry budgets by reason (see _schedule_retry):
+        #   local processing_error → small cap (a bug shouldn't retry forever)
+        #   backend "retry"        → large cap (survive a minutes/hours OCR backlog)
+        #   "empty" (0-byte)       → medium cap, then FAIL (genuinely empty)
         self._max_retries = max_retries
         self._retry_base = retry_base_seconds
+        self._backend_retry_max = backend_retry_max
+        self._empty_retry_max = empty_retry_max
+        self._retry_max_delay = retry_max_delay
         # Shared across all roots + retries (built by the daemon) so a burst can
         # never fan out into a flood of simultaneous pushes. A no-op unbounded
         # fallback keeps the engine usable standalone (tests).
@@ -132,6 +147,14 @@ class IngestEngine:
                 return
             ok, reason = classify(self._config, relpath, info.size)
             if not ok:
+                if reason == "empty":
+                    # 0 bytes at settle is almost always a mid-copy read (SMB has
+                    # no CLOSE_WRITE, so the settle debouncer can fire between
+                    # write chunks). Retry to let the copy finish instead of
+                    # terminal-rejecting; a file that stays empty across the
+                    # budget fails in _schedule_retry.
+                    await self._schedule_retry(relpath, attempt, "empty")
+                    return
                 await self._move(relpath, MoveAction.FAILED, reason or "rejected")
                 return
 
@@ -185,19 +208,38 @@ class IngestEngine:
             await self._on_failed(self._root.name, relpath, reason)
 
     async def _schedule_retry(self, relpath: str, attempt: int, reason: str) -> None:
-        if attempt + 1 >= self._max_retries:
+        # Budget by reason: a backend "retry" (doc still OCR'ing) survives a long
+        # backlog; a local processing_error is capped tight; an "empty" 0-byte
+        # read gets a short wait then FAILS if it never gains bytes.
+        cap = {
+            "retry": self._backend_retry_max,
+            "empty": self._empty_retry_max,
+        }.get(reason, self._max_retries)
+
+        if attempt + 1 >= cap:
+            if reason == "empty":
+                # Stayed 0 bytes across the whole wait → genuinely empty. Terminal.
+                logger.warning(
+                    "root %s: %s still empty after %d checks; moving to failed/",
+                    self._root.name, relpath, cap,
+                )
+                await self._move(relpath, MoveAction.FAILED, "empty")
+                return
             # Give up: leave the file in the inbox + release it (a future event or
-            # the next restart's reconciliation will re-try). Notify the operator.
+            # the next reconcile will re-try). Notify the operator.
             self._inflight.discard(relpath)
             logger.warning(
                 "root %s: %s exhausted %d retries (%s); leaving in inbox",
-                self._root.name, relpath, self._max_retries, reason,
+                self._root.name, relpath, cap, reason,
             )
             if self._on_failed is not None:
                 await self._on_failed(self._root.name, relpath, f"retry_exhausted: {reason}")
             return
 
-        delay = self._retry_base * (2 ** attempt)
+        # Exponential backoff, capped so the interval plateaus (a 480-attempt
+        # backend budget must not compute 2**479 or sleep for years). Clamp the
+        # exponent before the (Python big-int) shift, then clamp the delay.
+        delay = min(self._retry_max_delay, self._retry_base * (2 ** min(attempt, 16)))
 
         async def _later() -> None:
             try:

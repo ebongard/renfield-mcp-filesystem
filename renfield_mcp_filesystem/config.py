@@ -111,6 +111,23 @@ class Config(BaseModel):
     # inbox after retry-exhaustion during a backend outage/restart are re-tried
     # WITHOUT a manual MCP restart. 0 disables the poller.
     health_poll_seconds: float = 30.0
+    # A backend RETRY means the document is still being processed (an OCR
+    # backlog), NOT a transient error — it WILL get a terminal response once its
+    # own indexing completes. Give it a far larger retry budget than a local
+    # processing error so a minutes-to-hours backlog doesn't exhaust the small
+    # transient cap (`max_retries`) and strand the file in the inbox — the
+    # 2026-07-02 stranding, where a 66-doc burst kept re-pushes returning RETRY
+    # long past ~30s. Bounded (not infinite) so a genuinely stuck document
+    # eventually notifies the operator; the delay is capped so the interval
+    # plateaus rather than growing unboundedly (default ~8h at the cap).
+    backend_retry_max_attempts: int = 480
+    retry_max_delay_seconds: float = 60.0
+    # A file that is 0 bytes at settle time is almost always a mid-copy read
+    # (SMB has no CLOSE_WRITE, so the settle debouncer can fire between write
+    # chunks). Retry a few times to let the copy finish rather than immediately
+    # terminal-rejecting it to failed/; only a file that stays 0 bytes across
+    # this whole budget is treated as genuinely empty.
+    empty_retry_max_attempts: int = 8
 
     @property
     def max_file_size_bytes(self) -> int:
@@ -159,6 +176,15 @@ def load_config() -> Config:
         push_timeout_seconds=float(os.environ.get("FILES_PUSH_TIMEOUT_SECONDS", "120")),
         max_concurrent_pushes=int(os.environ.get("FILES_MAX_CONCURRENT_PUSHES", "4")),
         health_poll_seconds=float(os.environ.get("FILES_HEALTH_POLL_SECONDS", "30")),
+        backend_retry_max_attempts=int(
+            os.environ.get("FILES_BACKEND_RETRY_MAX_ATTEMPTS", "480")
+        ),
+        retry_max_delay_seconds=float(
+            os.environ.get("FILES_RETRY_MAX_DELAY_SECONDS", "60")
+        ),
+        empty_retry_max_attempts=int(
+            os.environ.get("FILES_EMPTY_RETRY_MAX_ATTEMPTS", "8")
+        ),
         roots_path=roots_path,
         roots=roots,
     )
