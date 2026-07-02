@@ -21,7 +21,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 
 from ..config import SmbRoot
-from .base import FileInfo, FolderProvider, SettledFile
+from .base import FileInfo, FolderProvider, SettledFile, safe_relpath
 
 logger = logging.getLogger("renfield-mcp-filesystem.smb")
 
@@ -258,7 +258,13 @@ class SmbProvider(FolderProvider):
     # -- on-demand file ops (smbclient; verified at E2E) --
 
     def _child_unc(self, relpath: str) -> str:
-        """A path WITHIN the watched inbox (`<share>/<path>/<relpath>`)."""
+        """A path WITHIN the watched inbox (`<share>/<path>/<relpath>`).
+
+        Defense in depth (review H5): validate the relpath here too, so a direct
+        provider call (not routed through ``tools.split_path``) can't build a UNC
+        containing ``..`` for the SMB server to resolve outside the inbox.
+        """
+        relpath = safe_relpath(relpath)
         return _unc(self._root.server, self._root.share, self._root.path, relpath)
 
     def _root_unc(self, relpath: str) -> str:
@@ -266,7 +272,15 @@ class SmbProvider(FolderProvider):
         subdirs live here — siblings of the inbox, not nested under it — so a
         `path: incomming` root moves files to `<share>/processed`, giving the
         `<share>/{incomming,processed,failed}` layout. With `path: ""`
-        (watch the share root) this is identical to `_child_unc`."""
+        (watch the share root) this is identical to `_child_unc`.
+
+        Guarded by ``safe_relpath`` (review H5 follow-up): the only caller builds
+        ``<subdir>/<name>``, so a traversal smuggled through ``subdir`` (e.g. the
+        backslash-separated ``..\\..\\evil`` that the tool-layer ``/``-only check
+        missed) would otherwise reach the SMB server as ``..`` here. Normalizing
+        ``\\``→``/`` and rejecting any ``..`` segment closes the move/write escape.
+        """
+        relpath = safe_relpath(relpath)
         return _unc(self._root.server, self._root.share, relpath)
 
     async def stat(self, relpath: str) -> FileInfo | None:
