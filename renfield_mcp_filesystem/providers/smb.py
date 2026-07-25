@@ -99,29 +99,46 @@ class SmbProvider(FolderProvider):
         self._reconnect_base = 2.0
         self._reconnect_cap = 60.0
         self._excluded = {root.processed_subdir, root.failed_subdir}
+        self._creds = None
 
     @property
     def last_error(self) -> str | None:
         return self._last_error
+
+    def _ck(self) -> dict:
+        """Per-operation SMB connection kwargs (username/password/port).
+
+        Passed to EVERY smbclient call so a file op self-authenticates. Without
+        this, ops relied on the single startup `register_session`; an idle SMB
+        disconnect drops that pooled session and smbclient then auto-registers a
+        NEW session WITHOUT credentials → SMBAuthenticationError ("no username or
+        password"), and files silently pile up in the inbox until a restart."""
+        if self._creds is None:
+            self._creds = self._root.credentials()
+        return {
+            "username": self._creds.username,
+            "password": self._creds.password,
+            "port": self._root.port,
+        }
 
     # -- lifecycle --
 
     async def connect(self) -> None:
         import smbclient
 
-        creds = self._root.credentials()
+        self._creds = self._root.credentials()
         await asyncio.to_thread(
             smbclient.register_session,
-            self._root.server, username=creds.username, password=creds.password,
+            self._root.server, username=self._creds.username, password=self._creds.password,
             port=self._root.port,
         )
         # ensure the watched inbox + the (share-root-level) processed/failed
         # dirs exist. processed/failed are SIBLINGS of the inbox at the share
         # root (see _root_unc), not nested under it — so a share laid out as
         # \\server\share\{incomming,processed,failed} works as-is.
-        await asyncio.to_thread(smbclient.makedirs, self._inbox_unc, exist_ok=True)
+        await asyncio.to_thread(smbclient.makedirs, self._inbox_unc, exist_ok=True, **self._ck())
         for sub in (self._root.processed_subdir, self._root.failed_subdir):
-            await asyncio.to_thread(smbclient.makedirs, self._root_unc(sub), exist_ok=True)
+            await asyncio.to_thread(smbclient.makedirs, self._root_unc(sub), exist_ok=True, **self._ck())
 
     async def start(self) -> None:
         await self.connect()
@@ -287,7 +304,7 @@ class SmbProvider(FolderProvider):
         import smbclient
 
         try:
-            st = await asyncio.to_thread(smbclient.stat, self._child_unc(relpath))
+            st = await asyncio.to_thread(smbclient.stat, self._child_unc(relpath), **self._ck())
         except OSError:
             return None
         return FileInfo(relpath=relpath, size=st.st_size, mtime=st.st_mtime)
@@ -296,7 +313,7 @@ class SmbProvider(FolderProvider):
         import smbclient
 
         def _read() -> bytes:
-            with smbclient.open_file(self._child_unc(relpath), mode="rb") as fh:
+            with smbclient.open_file(self._child_unc(relpath), mode="rb", **self._ck()) as fh:
                 return fh.read()
 
         return await asyncio.to_thread(_read)
@@ -317,14 +334,14 @@ class SmbProvider(FolderProvider):
             while True:
                 dest_rel = f"{subdir}/{dest_name}"
                 try:
-                    smbclient.stat(self._root_unc(dest_rel))
+                    smbclient.stat(self._root_unc(dest_rel), **self._ck())
                 except OSError:
                     break  # free slot
                 stem, dot, ext = name.partition(".")
                 dest_name = f"{stem}_{i}{dot}{ext}" if dot else f"{name}_{i}"
                 i += 1
             # src is in the inbox; dest is the share-root processed/failed dir.
-            smbclient.rename(self._child_unc(relpath), self._root_unc(dest_rel))
+            smbclient.rename(self._child_unc(relpath), self._root_unc(dest_rel), **self._ck())
             return dest_rel
 
         return await asyncio.to_thread(_move)
@@ -334,7 +351,7 @@ class SmbProvider(FolderProvider):
 
         def _scan() -> list[FileInfo]:
             out: list[FileInfo] = []
-            for entry in smbclient.scandir(self._inbox_unc):
+            for entry in smbclient.scandir(self._inbox_unc, **self._ck()):
                 if not entry.is_file():
                     continue  # excludes the processed/failed subdirs
                 if pattern and not fnmatch.fnmatch(entry.name, pattern):
