@@ -5,4 +5,4 @@ pushed into Renfield over REST (`POST /api/folder-ingest/document`). The dedicat
 server is the sole access boundary to the shares — the backend never mounts them.
 """
 
-__version__ = "0.1.4"
+__version__ = "0.1.7"

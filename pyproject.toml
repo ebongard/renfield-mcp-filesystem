@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "renfield-mcp-filesystem"
-version = "0.1.4"
+version = "0.1.7"
 description = "Watch-folder MCP server: event-driven detection of new files on local/SMB shares, pushed into Renfield over REST."
 readme = "README.md"
 license = {text = "MIT"}
