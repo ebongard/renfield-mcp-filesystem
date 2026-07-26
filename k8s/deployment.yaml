@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: renfield-mcp-filesystem
-          image: registry.treehouse.x-idra.de/renfield/filesystem-mcp:latest
+          image: registry.treehouse.x-idra.de/renfield/filesystem-mcp:v0.1.7
           ports:
             - containerPort: 8080
           env:
@@ -29,9 +29,19 @@ spec:
               value: "http://backend:8000"
             - name: FILES_ROOTS_YAML
               value: "/config/roots.yaml"
-            # Optional: POST failure/disconnect notifications somewhere.
-            # - name: FILES_NOTIFY_WEBHOOK_URL
-            #   value: "http://backend:8000/api/notifications/webhook"
+            # MCP self-detection: POST this watcher's own failures (SMB-auth, share
+            # down, retry-exhausted) to the backend health endpoint so they surface
+            # as a proactive admin alert + internal.system_health entry instead of
+            # dead-ending in logs. Token = the same folder-ingest push token this
+            # deployment already holds (via envFrom), referenced by secretKeyRef
+            # because k8s $(VAR) expansion does not reach envFrom-provided vars.
+            - name: FILES_NOTIFY_WEBHOOK_URL
+              value: "http://backend:8000/api/mcp-health/report"
+            - name: FILES_NOTIFY_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: renfield-mcp-filesystem-secrets
+                  key: RENFIELD_INGEST_TOKEN
           envFrom:
             - secretRef:
                 name: renfield-mcp-filesystem-secrets
