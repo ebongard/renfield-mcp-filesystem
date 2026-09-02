@@ -39,6 +39,9 @@ class FakeProv(FolderProvider):
     async def list_files(self, pattern=None):
         return []
 
+    async def rename_within_processed(self, src_name, target_name):
+        return None
+
     @property
     def connected(self):
         return self.started and not self.stopped

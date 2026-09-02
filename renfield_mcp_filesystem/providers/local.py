@@ -19,7 +19,13 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from ..config import LocalRoot
-from .base import FileInfo, FolderProvider, SettledFile
+from .base import (
+    FileInfo,
+    FolderProvider,
+    SettledFile,
+    collision_candidates,
+    is_bare_filename,
+)
 
 
 class _InboxHandler(FileSystemEventHandler):
@@ -143,6 +149,26 @@ class LocalProvider(FolderProvider):
             if not candidate.exists():
                 return candidate
             i += 1
+
+    async def rename_within_processed(self, src_name: str, target_name: str) -> str | None:
+        if not is_bare_filename(src_name) or not is_bare_filename(target_name):
+            raise ValueError("rename names must be bare filenames")
+
+        def _do() -> str | None:
+            procdir = self._inbox / self._processed_name
+            src = procdir / src_name
+            if not src.is_file():
+                return None  # idempotent no-op: already renamed / never moved here
+            for cand in collision_candidates(target_name):
+                dest = procdir / cand
+                if dest == src:
+                    return str(src.relative_to(self._inbox))  # already the target name
+                if not dest.exists():
+                    os.replace(src, dest)  # atomic within the same filesystem
+                    return str(dest.relative_to(self._inbox))
+            return None  # unreachable (collision_candidates is infinite)
+
+        return await asyncio.to_thread(_do)
 
     async def list_files(self, pattern: str | None = None) -> list[FileInfo]:
         def _scan() -> list[FileInfo]:

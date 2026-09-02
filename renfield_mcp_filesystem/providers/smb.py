@@ -21,7 +21,14 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 
 from ..config import SmbRoot
-from .base import FileInfo, FolderProvider, SettledFile, safe_relpath
+from .base import (
+    FileInfo,
+    FolderProvider,
+    SettledFile,
+    collision_candidates,
+    is_bare_filename,
+    safe_relpath,
+)
 
 logger = logging.getLogger("renfield-mcp-filesystem.smb")
 
@@ -345,6 +352,35 @@ class SmbProvider(FolderProvider):
             return dest_rel
 
         return await asyncio.to_thread(_move)
+
+    async def rename_within_processed(self, src_name: str, target_name: str) -> str | None:
+        import smbclient
+
+        if not is_bare_filename(src_name) or not is_bare_filename(target_name):
+            raise ValueError("rename names must be bare filenames")
+        procdir = self._root.processed_subdir
+
+        def _do() -> str | None:
+            src_rel = f"{procdir}/{src_name}"
+            try:
+                smbclient.stat(self._root_unc(src_rel), **self._ck())
+            except OSError:
+                return None  # idempotent no-op: already renamed / never moved here
+            for cand in collision_candidates(target_name):
+                if cand == src_name:
+                    return src_rel  # already the target name
+                dest_rel = f"{procdir}/{cand}"
+                try:
+                    smbclient.stat(self._root_unc(dest_rel), **self._ck())
+                    continue  # taken by a different file → next candidate
+                except OSError:
+                    smbclient.rename(
+                        self._root_unc(src_rel), self._root_unc(dest_rel), **self._ck()
+                    )
+                    return dest_rel
+            return None  # unreachable (collision_candidates is infinite)
+
+        return await asyncio.to_thread(_do)
 
     async def list_files(self, pattern: str | None = None) -> list[FileInfo]:
         import smbclient

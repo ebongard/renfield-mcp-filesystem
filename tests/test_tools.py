@@ -94,6 +94,83 @@ async def test_move_file_invalid_subdir(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rename_processed_sanitizes_and_keeps_ext(tmp_path):
+    proc = tmp_path / "processed"
+    proc.mkdir()
+    (proc / "2026_03_29.pdf").write_bytes(b"x")
+    reg = _registry(tmp_path)
+    # Illegal SMB chars (/ : ?) + collapsing whitespace; extension preserved.
+    out = await t.rename_processed(reg, "2026_03_29.pdf", 'Rechnung: PVS/Rhein  vom 18.05.2026?')
+    assert out["renamed"] is True and out["root"] == "docs"
+    assert out["renamed_to"] == "docs/processed/Rechnung PVS Rhein vom 18.05.2026.pdf"
+    assert (proc / "Rechnung PVS Rhein vom 18.05.2026.pdf").exists()
+
+
+@pytest.mark.asyncio
+async def test_rename_processed_idempotent_noop(tmp_path):
+    (tmp_path / "processed").mkdir()
+    reg = _registry(tmp_path)
+    out = await t.rename_processed(reg, "never_moved.pdf", "Some Title")
+    assert out["renamed"] is False and out["noop"] is True
+    assert out["target"] == "Some Title.pdf"
+
+
+@pytest.mark.asyncio
+async def test_rename_processed_collision(tmp_path):
+    proc = tmp_path / "processed"
+    proc.mkdir()
+    (proc / "src.pdf").write_bytes(b"new")
+    (proc / "Title.pdf").write_bytes(b"old")
+    reg = _registry(tmp_path)
+    out = await t.rename_processed(reg, "src.pdf", "Title")
+    assert out["renamed_to"] == "docs/processed/Title (2).pdf"
+
+
+@pytest.mark.asyncio
+async def test_rename_processed_rejects_traversal(tmp_path):
+    reg = _registry(tmp_path)
+    # original_name with a separator / traversal is a hard error (literal path part).
+    assert "error" in await t.rename_processed(reg, "../etc/passwd", "x")
+    assert "error" in await t.rename_processed(reg, "a/b.pdf", "x")
+    # new_base that sanitizes to nothing usable is rejected.
+    assert "error" in await t.rename_processed(reg, "ok.pdf", "///")
+    assert "error" in await t.rename_processed(reg, "ok.pdf", "..")
+
+
+@pytest.mark.asyncio
+async def test_rename_processed_scrubs_separators_in_new_base(tmp_path):
+    # A separator smuggled into new_base is SCRUBBED, never an escape.
+    proc = tmp_path / "processed"
+    proc.mkdir()
+    (proc / "s.pdf").write_bytes(b"x")
+    reg = _registry(tmp_path)
+    out = await t.rename_processed(reg, "s.pdf", "../../evil")
+    # "../../evil" → scrubbed to "evil"; stays inside processed/.
+    assert out["renamed_to"] == "docs/processed/evil.pdf"
+    assert (proc / "evil.pdf").exists()
+    assert not (tmp_path.parent / "evil.pdf").exists()
+
+
+@pytest.mark.asyncio
+async def test_rename_processed_searches_all_roots(tmp_path):
+    # Two roots; the file lives in the SECOND root's processed dir.
+    r1 = tmp_path / "r1"
+    r2 = tmp_path / "r2"
+    (r2 / "processed").mkdir(parents=True)
+    (r1 / "processed").mkdir(parents=True)
+    (r2 / "processed" / "doc.pdf").write_bytes(b"z")
+    cfg = Config(
+        renfield_url="http://renfield", ingest_token="tok",
+        allowed_extensions=("pdf",),
+        roots=[LocalRoot(name="one", path=str(r1)), LocalRoot(name="two", path=str(r2))],
+    )
+    reg = DaemonManager(cfg)
+    out = await t.rename_processed(reg, "doc.pdf", "Final Title")
+    assert out["renamed"] is True and out["root"] == "two"
+    assert (r2 / "processed" / "Final Title.pdf").exists()
+
+
+@pytest.mark.asyncio
 async def test_traversal_via_path_rejected(tmp_path):
     reg = _registry(tmp_path)
     # split_path yields relpath "../../etc/passwd"; the provider rejects traversal

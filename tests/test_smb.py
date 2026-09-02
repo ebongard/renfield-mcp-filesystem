@@ -8,11 +8,32 @@ import asyncio
 import pytest
 from smbprotocol.change_notify import FileAction
 
+from renfield_mcp_filesystem.config import SmbRoot
 from renfield_mcp_filesystem.providers.smb import (
     SettleDebouncer,
+    SmbProvider,
     _unc,
     classify_action,
 )
+
+
+def _smb_provider():
+    return SmbProvider(
+        SmbRoot(
+            name="r", server="nas", share="Docs", path="incomming",
+            username_env="U", password_env="P",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_rename_within_processed_rejects_bad_names():
+    # The bare-name guard raises BEFORE any smbclient I/O (I/O is E2E-only).
+    p = _smb_provider()
+    with pytest.raises(ValueError):
+        await p.rename_within_processed("../escape.pdf", "ok.pdf")
+    with pytest.raises(ValueError):
+        await p.rename_within_processed("ok.pdf", "sub/dir.pdf")
 
 
 def test_classify_action():

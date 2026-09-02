@@ -13,7 +13,12 @@ import base64
 import os
 
 from .daemon import DaemonManager
-from .providers.base import safe_relpath
+from .providers.base import (
+    is_bare_filename,
+    safe_relpath,
+    sanitize_filename_base,
+    split_ext,
+)
 
 # When truncate=True (interactive/LLM use) cap the returned content so the
 # base64 stays under the MCP-manager's 128 KB response cap. truncate=False
@@ -136,3 +141,51 @@ async def move_file(reg: DaemonManager, path: str, subdir: str) -> dict:
     except ValueError as exc:  # traversal rejected by the provider
         return _err(str(exc))
     return {"moved_to": f"{root}/{new_rel}"}
+
+
+async def rename_processed(reg: DaemonManager, original_name: str, new_base: str) -> dict:
+    """Rename an already-moved file in ``processed/`` to a human-readable base name (#881).
+
+    The backend calls this AFTER it synthesizes ``documents.generated_title`` for a
+    folder-ingest doc — the file was moved into ``processed/`` under its ORIGINAL
+    name at push time (before the title existed). ``original_name`` is that moved
+    filename (``documents.filename``); ``new_base`` is the desired base name WITHOUT
+    an extension (the original extension is preserved).
+
+    Searches every configured root's ``processed/`` dir for ``original_name`` and
+    renames the first match. Idempotent (not found in any root → success no-op),
+    collision-safe (a taken target gets a `` (2)`` suffix), and sanitized (illegal
+    SMB chars scrubbed, length capped). Traversal in either name is rejected.
+    """
+    # original_name must be a bare filename — no separators / drive / ADS /
+    # traversal can reach the provider as a literal path component.
+    if not is_bare_filename(original_name):
+        return _err(f"invalid original_name: {original_name!r}")
+
+    # new_base is SCRUBBED (defense-in-depth behind the backend's sanitizer): the
+    # illegal-char pass replaces any separators/colons, so the result cannot
+    # contain a traversal — no escape from processed/ is possible. A value that
+    # sanitizes to nothing usable (e.g. "///", "..") is rejected.
+    safe_base = sanitize_filename_base(new_base)
+    if not safe_base:
+        return _err(f"new_base sanitized to empty: {new_base!r}")
+
+    # Preserve the original extension; the title carries none.
+    _stem, ext = split_ext(original_name)
+    target_name = f"{safe_base}{ext}"
+
+    for root in reg.names():
+        provider = reg.get(root)
+        if provider is None:
+            continue
+        try:
+            new_rel = await provider.rename_within_processed(original_name, target_name)
+        except ValueError as exc:  # bad name rejected by the provider
+            return _err(str(exc))
+        except Exception as exc:  # noqa: BLE001 — one root's I/O error must not abort the sweep
+            return _err(f"rename failed in root {root!r}: {exc}")
+        if new_rel is not None:
+            return {"renamed": True, "root": root, "renamed_to": f"{root}/{new_rel}"}
+
+    # Not present in any processed/ dir → already renamed or never moved. No-op.
+    return {"renamed": False, "noop": True, "target": target_name}

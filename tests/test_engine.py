@@ -45,6 +45,9 @@ class FakeProvider(FolderProvider):
     async def list_files(self, pattern=None):
         return [FileInfo(r, len(self.files[r]), 0.0) for r in self._existing if r in self.files]
 
+    async def rename_within_processed(self, src_name, target_name):
+        return None
+
     @property
     def connected(self):
         return True

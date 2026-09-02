@@ -94,3 +94,58 @@ async def test_traversal_rejected(tmp_path):
         await p.stat("../../etc/passwd")
     with pytest.raises(ValueError, match="traversal"):
         await p.read_bytes("../escape.pdf")
+
+
+# -- rename_within_processed (#881) --
+
+@pytest.mark.asyncio
+async def test_rename_within_processed_renames_and_keeps_ext(tmp_path):
+    proc = tmp_path / "processed"
+    proc.mkdir()
+    (proc / "2026_03_29.pdf").write_bytes(b"pdfbytes")
+    p = _provider(tmp_path)
+    new = await p.rename_within_processed("2026_03_29.pdf", "Rechnung PVS vom 18.05.2026.pdf")
+    assert new == "processed/Rechnung PVS vom 18.05.2026.pdf"
+    assert (proc / "Rechnung PVS vom 18.05.2026.pdf").read_bytes() == b"pdfbytes"
+    assert not (proc / "2026_03_29.pdf").exists()
+
+
+@pytest.mark.asyncio
+async def test_rename_within_processed_noop_when_source_absent(tmp_path):
+    (tmp_path / "processed").mkdir()
+    p = _provider(tmp_path)
+    # Source never moved / already renamed → idempotent no-op (None), no raise.
+    assert await p.rename_within_processed("gone.pdf", "whatever.pdf") is None
+
+
+@pytest.mark.asyncio
+async def test_rename_within_processed_collision_suffix(tmp_path):
+    proc = tmp_path / "processed"
+    proc.mkdir()
+    (proc / "src.pdf").write_bytes(b"new")
+    (proc / "Invoice.pdf").write_bytes(b"existing")  # target already taken
+    p = _provider(tmp_path)
+    new = await p.rename_within_processed("src.pdf", "Invoice.pdf")
+    assert new == "processed/Invoice (2).pdf"
+    assert (proc / "Invoice (2).pdf").read_bytes() == b"new"
+    assert (proc / "Invoice.pdf").read_bytes() == b"existing"  # untouched
+
+
+@pytest.mark.asyncio
+async def test_rename_within_processed_same_name_is_noop(tmp_path):
+    proc = tmp_path / "processed"
+    proc.mkdir()
+    (proc / "same.pdf").write_bytes(b"x")
+    p = _provider(tmp_path)
+    new = await p.rename_within_processed("same.pdf", "same.pdf")
+    assert new == "processed/same.pdf"
+    assert (proc / "same.pdf").read_bytes() == b"x"
+
+
+@pytest.mark.asyncio
+async def test_rename_within_processed_rejects_traversal(tmp_path):
+    p = _provider(tmp_path)
+    with pytest.raises(ValueError):
+        await p.rename_within_processed("../escape.pdf", "x.pdf")
+    with pytest.raises(ValueError):
+        await p.rename_within_processed("ok.pdf", "../../evil.pdf")

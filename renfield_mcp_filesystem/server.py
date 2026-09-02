@@ -80,6 +80,18 @@ async def move_file(path: str, subdir: str) -> dict:
     return await t.move_file(_reg(), path, subdir)
 
 
+@mcp.tool()
+async def rename_processed(original_name: str, new_base: str) -> dict:
+    """Rename an already-archived file in ``processed/`` to a human title.
+
+    Backend-driven post-ingest rename (#881): ``original_name`` is the file's
+    moved name (``documents.filename``); ``new_base`` is the desired base name
+    WITHOUT an extension (the original extension is preserved). Idempotent (a
+    missing source is a success no-op), collision-safe (`` (2)`` suffix), and the
+    base name is sanitized to a safe SMB filename."""
+    return await t.rename_processed(_reg(), original_name, new_base)
+
+
 async def _serve() -> None:
     """Launch the watch daemons AND the streamable-http MCP server in one event
     loop. The daemons must run at process startup (the auto-push path is the
